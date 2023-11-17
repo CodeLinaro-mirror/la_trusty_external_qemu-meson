@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import sys, os
 import configparser
@@ -27,6 +28,8 @@ from .. import mesonlib, msubprojects
 if T.TYPE_CHECKING:
     import argparse
 
+# Note: when adding arguments, please also add them to the completion
+# scripts in $MESONSRC/data/shell-completions/
 def add_arguments(parser: 'argparse.ArgumentParser') -> None:
     subparsers = parser.add_subparsers(title='Commands', dest='command')
     subparsers.required = True

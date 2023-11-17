@@ -18,19 +18,19 @@ from __future__ import annotations
 import dataclasses
 import typing as T
 
-from .. import mesonlib
-from ..mesonlib import relpath, HoldableObject, MachineChoice
+from .. import build, mesonlib
+from ..build import IncludeDirs
 from ..interpreterbase.decorators import noKwargs, noPosargs
+from ..mesonlib import relpath, HoldableObject, MachineChoice
 from ..programs import ExternalProgram
 
 if T.TYPE_CHECKING:
-    from .. import build
     from ..interpreter import Interpreter
+    from ..interpreter.interpreter import ProgramVersionFunc
     from ..interpreter.interpreterobjects import MachineHolder
     from ..interpreterbase import TYPE_var, TYPE_kwargs
     from ..programs import OverrideProgram
     from ..wrap import WrapMode
-    from ..build import EnvironmentVariables, Executable
     from ..dependencies import Dependency
 
 class ModuleState:
@@ -85,15 +85,18 @@ class ModuleState:
 
         return dirs_str
 
-    def find_program(self, prog: T.Union[str, T.List[str]], required: bool = True,
-                     version_func: T.Optional[T.Callable[['ExternalProgram'], str]] = None,
+    def find_program(self, prog: T.Union[mesonlib.FileOrString, T.List[mesonlib.FileOrString]],
+                     required: bool = True,
+                     version_func: T.Optional[ProgramVersionFunc] = None,
                      wanted: T.Optional[str] = None, silent: bool = False,
-                     for_machine: MachineChoice = MachineChoice.HOST) -> 'ExternalProgram':
+                     for_machine: MachineChoice = MachineChoice.HOST) -> T.Union[ExternalProgram, build.Executable, OverrideProgram]:
+        if not isinstance(prog, list):
+            prog = [prog]
         return self._interpreter.find_program_impl(prog, required=required, version_func=version_func,
                                                    wanted=wanted, silent=silent, for_machine=for_machine)
 
     def find_tool(self, name: str, depname: str, varname: str, required: bool = True,
-                  wanted: T.Optional[str] = None) -> T.Union['Executable', ExternalProgram, 'OverrideProgram']:
+                  wanted: T.Optional[str] = None) -> T.Union['build.Executable', ExternalProgram, 'OverrideProgram']:
         # Look in overrides in case it's built as subproject
         progobj = self._interpreter.program_from_overrides([name], [])
         if progobj is not None:
@@ -109,14 +112,19 @@ class ModuleState:
         if dep.found() and dep.type_name == 'pkgconfig':
             value = dep.get_variable(pkgconfig=varname)
             if value:
-                return ExternalProgram(name, [value])
+                progobj = ExternalProgram(value)
+                if not progobj.found():
+                    msg = (f'Dependency {depname!r} tool variable {varname!r} contains erroneous value: {value!r}\n\n'
+                           'This is a distributor issue -- please report it to your {depname} provider.')
+                    raise mesonlib.MesonException(msg)
+                return progobj
 
         # Normal program lookup
         return self.find_program(name, required=required, wanted=wanted)
 
     def dependency(self, depname: str, native: bool = False, required: bool = True,
                    wanted: T.Optional[str] = None) -> 'Dependency':
-        kwargs = {'native': native, 'required': required}
+        kwargs: T.Dict[str, object] = {'native': native, 'required': required}
         if wanted:
             kwargs['version'] = wanted
         # FIXME: Even if we fix the function, mypy still can't figure out what's
@@ -141,7 +149,7 @@ class ModuleState:
     def get_option(self, name: str, subproject: str = '',
                    machine: MachineChoice = MachineChoice.HOST,
                    lang: T.Optional[str] = None,
-                   module: T.Optional[str] = None) -> T.Union[str, int, bool, 'WrapMode']:
+                   module: T.Optional[str] = None) -> T.Union[T.List[str], str, int, bool, 'WrapMode']:
         return self.environment.coredata.get_option(mesonlib.OptionKey(name, subproject, machine, lang, module))
 
     def is_user_defined_option(self, name: str, subproject: str = '',
@@ -151,6 +159,21 @@ class ModuleState:
         key = mesonlib.OptionKey(name, subproject, machine, lang, module)
         return key in self._interpreter.user_defined_options.cmd_line_options
 
+    def process_include_dirs(self, dirs: T.Iterable[T.Union[str, IncludeDirs]]) -> T.Iterable[IncludeDirs]:
+        """Convert raw include directory arguments to only IncludeDirs
+
+        :param dirs: An iterable of strings and IncludeDirs
+        :return: None
+        :yield: IncludeDirs objects
+        """
+        for d in dirs:
+            if isinstance(d, IncludeDirs):
+                yield d
+            else:
+                yield self._interpreter.build_incdir_object([d])
+
+    def add_language(self, lang: str, for_machine: MachineChoice) -> None:
+        self._interpreter.add_languages([lang], True, for_machine)
 
 class ModuleObject(HoldableObject):
     """Base class for all objects returned by modules
@@ -202,8 +225,8 @@ class NewExtensionModule(ModuleObject):
     def found() -> bool:
         return True
 
-    def get_devenv(self) -> T.Optional['EnvironmentVariables']:
-        return None
+    def postconf_hook(self, b: build.Build) -> None:
+        pass
 
 # FIXME: Port all modules to stop using self.interpreter and use API on
 # ModuleState instead. Modules should stop using this class and instead use
@@ -229,20 +252,33 @@ class NotFoundExtensionModule(NewExtensionModule):
         return False
 
 
-def is_module_library(fname):
+def is_module_library(fname: mesonlib.FileOrString) -> bool:
     '''
     Check if the file is a library-like file generated by a module-specific
     target, such as GirTarget or TypelibTarget
     '''
-    if hasattr(fname, 'fname'):
-        fname = fname.fname
     suffix = fname.split('.')[-1]
-    return suffix in ('gir', 'typelib')
+    return suffix in {'gir', 'typelib'}
 
 
 class ModuleReturnValue:
     def __init__(self, return_value: T.Optional['TYPE_var'],
-                 new_objects: T.Sequence[T.Union['TYPE_var', 'build.ExecutableSerialisation']]) -> None:
+                 new_objects: T.Sequence[T.Union['TYPE_var', 'mesonlib.ExecutableSerialisation']]) -> None:
         self.return_value = return_value
         assert isinstance(new_objects, list)
-        self.new_objects: T.List[T.Union['TYPE_var', 'build.ExecutableSerialisation']] = new_objects
+        self.new_objects: T.List[T.Union['TYPE_var', 'mesonlib.ExecutableSerialisation']] = new_objects
+
+class GResourceTarget(build.CustomTarget):
+    pass
+
+class GResourceHeaderTarget(build.CustomTarget):
+    pass
+
+class GirTarget(build.CustomTarget):
+    pass
+
+class TypelibTarget(build.CustomTarget):
+    pass
+
+class VapiTarget(build.CustomTarget):
+    pass
