@@ -1090,7 +1090,7 @@ class Backend:
         for d in deps:
             if not d.is_linkable_target():
                 raise RuntimeError(f'Tried to link with a non-library target "{d.get_basename()}".')
-            arg = self.get_target_filename_for_linking(d)
+            arg = Path(self.get_target_filename_for_linking(d)).as_posix()
             if not arg:
                 continue
             if compiler.get_language() == 'd':
