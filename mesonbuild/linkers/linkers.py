@@ -1282,7 +1282,7 @@ class VisualStudioLikeLinkerMixin(DynamicLinkerBase):
         args = mesonlib.listify(args)
         l: T.List[str] = []
         for a in args:
-            l.extend(self._apply_prefix('/WHOLEARCHIVE:' + a))
+            l.extend(self._apply_prefix('/WHOLEARCHIVE:' + a.replace('\\', '/')))
         return l
 
     def get_allow_undefined_args(self) -> T.List[str]:
