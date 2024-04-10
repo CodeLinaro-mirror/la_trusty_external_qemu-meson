@@ -38,6 +38,7 @@ language_map = {
 }
 
 backend_generator_map = {
+    'bazel': 'Bazel',
     'ninja': 'Ninja',
     'xcode': 'Xcode',
     'vs2010': 'Visual Studio 10 2010',

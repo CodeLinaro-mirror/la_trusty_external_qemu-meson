@@ -73,7 +73,7 @@ if stable_version.endswith('.99'):
     stable_version_array[-2] = str(int(stable_version_array[-2]) + 1)
     stable_version = '.'.join(stable_version_array)
 
-backendlist = ['ninja', 'vs', 'vs2010', 'vs2012', 'vs2013', 'vs2015', 'vs2017', 'vs2019', 'vs2022', 'xcode', 'none']
+backendlist = ['bazel', 'ninja', 'vs', 'vs2010', 'vs2012', 'vs2013', 'vs2015', 'vs2017', 'vs2019', 'vs2022', 'xcode', 'none']
 genvslitelist = ['vs2022']
 buildtypelist = ['plain', 'debug', 'debugoptimized', 'release', 'minsize', 'custom']
 
@@ -730,7 +730,14 @@ class CoreData:
         opts_map[key] = opt.init_option(key, value, default_prefix())
 
     def init_backend_options(self, backend_name: str) -> None:
-        if backend_name == 'ninja':
+        if backend_name == 'bazel':
+            self.options[OptionKey('backend_shim')] = UserStringOption(
+                'Shim file to use for bazel generator.', ''
+            )
+            self.options[OptionKey('backend_shadow_build')] = UserStringOption(
+                'Shadow build directory to us', '/tmp/build'
+            )
+        elif backend_name == 'ninja':
             self.options[OptionKey('backend_max_links')] = UserIntegerOption(
                 'Maximum number of linker processes to run or 0 for no '
                 'limit',

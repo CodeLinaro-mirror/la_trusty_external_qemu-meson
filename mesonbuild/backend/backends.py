@@ -223,6 +223,9 @@ class TestSerialisation:
 
 
 def get_backend_from_name(backend: str, build: T.Optional[build.Build] = None, interpreter: T.Optional['Interpreter'] = None) -> T.Optional['Backend']:
+    if backend == 'bazel':
+        from . import bazelbackend
+        return bazelbackend.BazelBackend(build, interpreter)
     if backend == 'ninja':
         from . import ninjabackend
         return ninjabackend.NinjaBackend(build, interpreter)
