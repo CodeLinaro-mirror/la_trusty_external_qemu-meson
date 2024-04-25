@@ -279,10 +279,10 @@ class CustomTargetGenerator:
             BazelRule(
                 "genrule",
                 {
-                    "name": target.name,
-                    "srcs": [x for x in srcs],
+                    "name": f"generate_{target.name}",
+                    "srcs": sorted([x for x in srcs]),
                     "tools": tools,
-                    "outs": [x for x in outs],
+                    "outs": sorted([x for x in outs]),
                     "cmd": " ".join(cmd),
                 },
             )
@@ -329,11 +329,11 @@ class GeneratedListGenerator(CustomTargetGenerator):
         # extra_dependencies = self.get_target_depend_files(genlist)
         for i, curfile in enumerate(infilelist):
             if len(generator.outputs) == 1:
-                rule_name = f"{target.name}_{outfilelist[i]}"
+                rule_name = f"generate_{target.name}_{outfilelist[i]}"
                 target_dir = Path(self.backend.get_target_private_dir(target))
                 sole_output = Path.joinpath(target_dir, outfilelist[i]).as_posix()
             else:
-                rule_name = f"{target.name}_{curfile}"
+                rule_name = f"generate_{target.name}_{curfile}"
                 sole_output = Path(curfile).as_posix()
 
             infilename = self.resolver.find(curfile).as_posix()

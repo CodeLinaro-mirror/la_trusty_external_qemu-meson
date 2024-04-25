@@ -18,6 +18,7 @@ import typing as T
 
 from ... import mlog
 from ...mesonlib import OrderedSet
+from ... import build
 
 
 def as_bazel_label(target: str) -> str:
@@ -32,6 +33,13 @@ def as_bazel_label(target: str) -> str:
     target_cleaned = re.sub("^_+|_+$", "", target_cleaned)
 
     return target_cleaned
+
+
+def meson_target_as_bazel_label(target) -> str:
+    if isinstance(target, build.StaticLibrary):
+        return as_bazel_label(f"lib{target.name}")
+
+    return as_bazel_label(target.name)
 
 
 class BazelRule:
@@ -52,7 +60,8 @@ class BazelRule:
         self.params["name"] = value
 
     def is_valid(self):
-        if self.DEBUG_LOG: mlog.debug(f"Checking {self}")
+        if self.DEBUG_LOG:
+            mlog.debug(f"Checking {self}")
         srcs = self.params.get("srcs", [])
         data = self.params.get("data", [])
         return not (
@@ -79,6 +88,10 @@ class BazelRule:
             if isinstance(v, set) or isinstance(v, OrderedSet):
                 v = [x for x in v]
             if v:
+                if k == 'includes':
+                    # Make sure we don't re-order the includes
+                    # Windows relies on this.
+                    bazel_cmd += "   # buildifier: leave-alone\n"
                 bazel_cmd += f"   {k} = {v},\n"
         return f"{self.sort}({bazel_cmd})"
 
@@ -108,6 +121,8 @@ class BazelRuleLibrary:
         rule.params["deps"] = updated_deps
 
     def register(self, rule: BazelRule) -> BazelRule:
+        if self.DEBUG_LOG:
+            mlog.log(f"Registering {rule.name} -> {rule}")
         if rule.name in self.library:
             raise ValueError(f"Rule {rule.name} has been registered already")
 
@@ -127,7 +142,8 @@ class BazelRuleLibrary:
         for target in sorted(self.library.values()):
             if not target.is_valid():
                 mlog.warning(f"Target {target.name} is invalid {target}, ignoring.")
-                if self.DEBUG_LOG: mlog.debug(f"Broken target: {target}")
+                if self.DEBUG_LOG:
+                    mlog.debug(f"Broken target: {target}")
                 continue
 
             stream.write(str(target))
@@ -139,7 +155,8 @@ class BazelRuleLibrary:
     def _rebalance(self, parent, children):
         parent_rule = self.library[parent]
         sources = parent_rule.params["srcs"]
-        if self.DEBUG_LOG: mlog.debug(f"REBalancing: {parent} - {len(sources)}:  {sources}")
+        if self.DEBUG_LOG:
+            mlog.debug(f"REBalancing: {parent} - {len(sources)}:  {sources}")
 
         for child in children:
             child_rule = self.library[child]
@@ -181,12 +198,14 @@ class BazelRuleLibrary:
                     # Now let's see if we have the right type
                     restrict = shims.get("restrict_to", ".*")
                     if not re.match(restrict, rule.sort):
-                        if self.DEBUG_LOG: mlog.debug(
-                            f"Shim is restricted_to: {restrict}, ignoring {rule.sort}"
-                        )
+                        if self.DEBUG_LOG:
+                            mlog.debug(
+                                f"Shim is restricted_to: {restrict}, ignoring {rule.sort}"
+                            )
                         continue
 
-                    if self.DEBUG_LOG: mlog.debug(f"Shimming {rule.sort}(name = '{name}')")
+                    if self.DEBUG_LOG:
+                        mlog.debug(f"Shimming {rule.sort}(name = '{name}')")
                     # Okay, let's shim this rule:
                     for shim in shims.keys():
                         if shim == "restrict_to":
@@ -196,13 +215,17 @@ class BazelRuleLibrary:
                         if shim.startswith("-"):
                             # remove an entry matching the regex
                             param = shim[1:]
-                            if self.DEBUG_LOG: mlog.debug(f"Removal shim for: {param}")
+                            if self.DEBUG_LOG:
+                                mlog.debug(f"Removal shim for: {param}")
                             if param in rule.params:
                                 to_clean = OrderedSet()
                                 for entry in rule.params[param]:
                                     for shim_entry in to_shim:
                                         if re.match(shim_entry, entry):
-                                            if self.DEBUG_LOG: mlog.debug(f"Removing {entry} from {param}")
+                                            if self.DEBUG_LOG:
+                                                mlog.debug(
+                                                    f"Removing {entry} from {param}"
+                                                )
                                             to_clean.add(entry)
 
                                 rule.params[param] = rule.params[param].difference(
@@ -212,7 +235,8 @@ class BazelRuleLibrary:
                         elif shim.startswith("+"):
                             # add an entry matching
                             param = shim[1:]
-                            if self.DEBUG_LOG: mlog.debug(f"Adding shim for: {param}")
+                            if self.DEBUG_LOG:
+                                mlog.debug(f"Adding shim for: {param}")
                             if param not in rule.params:
                                 rule.params[param] = OrderedSet()
 
@@ -220,7 +244,8 @@ class BazelRuleLibrary:
                                 rule.params[param].add(entry)
 
                         else:
-                            if self.DEBUG_LOG: mlog.debug(f"Replacement shim for: {shim}")
+                            if self.DEBUG_LOG:
+                                mlog.debug(f"Replacement shim for: {shim}")
                             if isinstance(shim, str):
                                 rule.params[shim] = to_shim
                             else:

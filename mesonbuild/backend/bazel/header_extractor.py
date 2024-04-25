@@ -13,10 +13,12 @@
 # limitations under the License.
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import typing as T
 from functools import lru_cache
 from pathlib import Path
+from asyncio.subprocess import create_subprocess_exec, PIPE
 
 from ... import build, compilers, mlog
 from ...mesonlib import MesonBugException, OrderedSet
@@ -278,6 +280,57 @@ class HeaderExtractor:
         except subprocess.CalledProcessError:
             raise MesonBugException(
                 f"Failed to extract headers with {' '.join(cmd)} in {self.shadow_build_dir}, which is part of {target}"
+            )
+
+    async def extract_headers_from_compiler_output_async(
+        self,
+        target: build.BuildTarget,
+        srcfile: build.File,
+        cc: compilers.Compiler,
+        args: compilers.CompilerArgs,
+    ) -> T.List[Path]:
+        """Extracts header file paths from compiler dependency output.
+
+        (Asynchronous version using asyncio)
+        """
+
+        args.append("-M")
+        cmd = (
+            cc.get_exelist()
+            + [x for x in args]
+            + [
+                srcfile.absolute_path(
+                    self.resolver.source_dir,
+                    self.shadow_build_dir,
+                )
+            ]
+        )
+        sys_headers = self.sys_headers(cc)
+
+        if self.DEBUG_LOG:
+            mlog.debug(
+                f"Invoking compiler (cd {self.shadow_build_dir} && {' '.join(cmd)})"
+            )
+
+        try:
+            proc = await create_subprocess_exec(
+                *cmd, cwd=self.shadow_build_dir, stdout=PIPE, stderr=PIPE
+            )
+            stdout, stderr = await proc.communicate()
+
+            if proc.returncode != 0:
+                raise MesonBugException(
+                    f"Failed to extract headers with {' '.join(cmd)} in {self.shadow_build_dir}, which is part of {target}\n"
+                    f"Error output:\n{stderr.decode()}"
+                )
+
+            return self._extract_bazel_headers_from_dep(
+                stdout.decode("utf-8").splitlines(), sys_headers
+            )
+
+        except Exception as e:  # Catch a broader range of exceptions
+            raise MesonBugException(
+                f"Error during header extraction with {' '.join(cmd)} in {self.shadow_build_dir}: {e}"
             )
 
     def extract_headers_from_compiler_output(

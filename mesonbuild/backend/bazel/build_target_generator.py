@@ -30,7 +30,12 @@ from ...mesonlib import (
     get_compiler_for_source,
 )
 from ..backends import Backend
-from .bazel_rules import BazelRule, BazelRuleLibrary, ExtractionRule, as_bazel_label
+from .bazel_rules import (
+    BazelRule,
+    BazelRuleLibrary,
+    ExtractionRule,
+    meson_target_as_bazel_label,
+)
 from .header_extractor import HeaderExtractor
 from .path_resolver import PathResolver
 
@@ -48,8 +53,12 @@ def join_pairs(pairs_list):
 class TargetData:
     def __init__(self, target):
         self.target = target
-        self.includes = OrderedSet([z for x in target.get_include_dirs() for z in x.get_incdirs()])
-        self.deps = OrderedSet(as_bazel_label(t.name) for t in target.get_dependencies())
+        self.includes = OrderedSet(
+            [z for x in target.get_include_dirs() for z in x.get_incdirs()]
+        )
+        self.deps = OrderedSet(
+            meson_target_as_bazel_label(t) for t in target.get_dependencies()
+        )
         self.hdrs = OrderedSet()
         self.defines = OrderedSet()
         self.warnings = OrderedSet()
@@ -279,9 +288,9 @@ class BuildTargetGenerator:
                 "objc_library",
                 {
                     "name": self._darwin_subname(target),
-                    "srcs": OrderedSet([x for x in objc_data.compiled_sources]),
-                    "hdrs": OrderedSet([x for x in objc_data.hdrs]),
-                    "deps": OrderedSet(objc_data.deps),
+                    "srcs": OrderedSet(sorted([x for x in objc_data.compiled_sources])),
+                    "hdrs": OrderedSet(sorted([x for x in objc_data.hdrs])),
+                    "deps": OrderedSet(sorted(objc_data.deps)),
                     # TODO: Figure out what to do with these
                     # "copts": OrderedSet(objc_data.warnings).union(objc_data.fopts),
                     "defines": OrderedSet(objc_data.defines),
@@ -312,6 +321,26 @@ class BuildTargetGenerator:
             )
         )
 
+    def _generate_shared_library(self, target, cc_data):
+        return self.library.register(
+            BazelRule(
+                "cc_shared_library",
+                {
+                    "name": target.name,
+                    "srcs": OrderedSet(
+                        [x for x in cc_data.compiled_sources]
+                        + [x for x in cc_data.hdrs]
+                    ),
+                    # TODO: Figure out what to do with these
+                    # "copts": OrderedSet(cc_data.warnings).union(cc_data.fopts),
+                    "linkopts": OrderedSet(cc_data.linkopts),
+                    "deps": OrderedSet(cc_data.deps),
+                    "defines": OrderedSet(cc_data.defines),
+                    "includes": OrderedSet(cc_data.includes),
+                },
+            )
+        )
+
     def _darwin_subname(self, target):
         return f"internal_{target.name}_darwin"
 
@@ -319,7 +348,7 @@ class BuildTargetGenerator:
         return self.library.register(
             ExtractionRule(
                 {
-                    "name": target.name,
+                    "name": meson_target_as_bazel_label(target),
                     "alwayslink": hasattr(target, "alwayslink") and target.alwayslink,
                     "srcs": OrderedSet([x for x in cc_data.compiled_sources]),
                     "hdrs": OrderedSet([x for x in cc_data.hdrs]),
@@ -362,6 +391,26 @@ class BuildTargetGenerator:
             data.warnings.update(result.warnings)
             data.compiled_sources.extend(result.compiled_sources)
 
+        # Next we are going to remove unused includes:
+        cc_data.includes = OrderedSet(
+            [
+                x
+                for x in cc_data.includes
+                if x.startswith("platform")
+                or x == "."
+                or any(hdr.startswith(x) for hdr in cc_data.hdrs)
+            ]
+        )
+        objc_data.includes = OrderedSet(
+            [
+                x
+                for x in objc_data.includes
+                if x.startswith("platform")
+                or x == "."
+                or any(hdr.startswith(x) for hdr in objc_data.hdrs)
+            ]
+        )
+
         return cc_data, objc_data
 
     def _get_extended_deps(self, target, cc_data, objc_data):
@@ -393,7 +442,7 @@ class BuildTargetGenerator:
                 ]
 
                 if cpp_sources:
-                    extended_deps[obj.target.name] = cpp_sources
+                    extended_deps[meson_target_as_bazel_label(obj.target)] = cpp_sources
                     mlog.debug(
                         f"Extended deps: {target.name} ==> {obj.target.name}:"
                         f" {cpp_sources}"
@@ -431,7 +480,8 @@ class BuildTargetGenerator:
         to_process = []
         for src in sources + generated:
             if compilers.is_header(src) or not self.can_target_compile(target, src):
-                if self.DEBUG_LOG: mlog.debug(f"Not compiling: {src}")
+                if self.DEBUG_LOG:
+                    mlog.debug(f"Not compiling: {src}")
                 continue
             to_process.append(src)
 
@@ -444,9 +494,9 @@ class BuildTargetGenerator:
         cc_data, objc_data = self._process_results(results, target)
         cc_data.linkopts += self.apple_frameworks(target)
         objc_data.linkopts += self.apple_frameworks(target)
-        cc_data.deps.update([as_bazel_label(x.name) for x in target.get_dependencies()])
+        cc_data.deps.update([meson_target_as_bazel_label(x) for x in target.get_dependencies()])
         objc_data.deps.update(
-            [as_bazel_label(x.name) for x in target.get_dependencies()]
+            [meson_target_as_bazel_label(x) for x in target.get_dependencies()]
         )
 
         extended_deps = self._get_extended_deps(target, cc_data, objc_data)
@@ -456,7 +506,7 @@ class BuildTargetGenerator:
         if objc_data.compiled_sources:
             objc_data.linkopts += self.apple_frameworks(target)
             objc_data.deps.update(
-                [as_bazel_label(x.name) for x in target.get_dependencies()]
+                [meson_target_as_bazel_label(x) for x in target.get_dependencies()]
             )
             objc_lib = self._generate_objc_library(target, objc_data)
 
@@ -467,7 +517,15 @@ class BuildTargetGenerator:
             cc_data.deps.add(objc_lib.name)
 
         if isinstance(target, build.Executable):
+            m = self.backend.environment.machines[target.for_machine]
+            # Make sure that windows uses the right subsystem if defined
+            if m.is_windows() or m.is_cygwin():
+                linker, _ = target.get_clink_dynamic_linker_and_stdlibs()
+                cc_data.linkopts += linker.get_win_subsystem_args(target.win_subsystem)
             return self._generate_cc_binary(target, cc_data)
+
+        if isinstance(target, build.SharedLibrary):
+            return self._generate_shared_library(target, cc_data)
 
         if cc_data.compiled_sources:
             return self._generate_extraction_rule(target, cc_data, extended_deps)

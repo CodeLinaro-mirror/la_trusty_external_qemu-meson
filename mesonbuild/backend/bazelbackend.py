@@ -16,21 +16,23 @@ from __future__ import annotations
 
 import datetime
 import json
-import shutil
 import platform
+import re
+import shutil
+import textwrap
 import time
 import typing as T
 from functools import lru_cache
 from pathlib import Path
 
-from .. import build, mlog, dependencies
+from .. import build, dependencies, mlog
 from ..dependencies.pkgconfig import PkgConfigDependency
 from ..mesonlib import File, OptionKey, ProgressBar
 from .backends import Backend
 from .bazel.bazel_rules import BazelRuleLibrary
+from .bazel.build_target_generator import BuildTargetGenerator
 from .bazel.custom_target_generator import CustomTargetGenerator, GeneratedListGenerator
 from .bazel.header_extractor import HeaderExtractor
-from .bazel.build_target_generator import BuildTargetGenerator
 from .bazel.path_resolver import PathResolver
 
 if T.TYPE_CHECKING:
@@ -51,7 +53,9 @@ class BazelBackend(Backend):
         self.source_dir = Path(self.environment.get_source_dir())
         self.processed_targets = set()
         if self.build_dir.is_relative_to(self.source_dir):
-            raise NotImplementedError("Please keep your build directory outside of source dir")
+            raise NotImplementedError(
+                "Please keep your build directory outside of source dir"
+            )
 
     def load_shims(self):
         shim_f = Path(
@@ -66,40 +70,40 @@ class BazelBackend(Backend):
                 return json.loads(json_str)
         return {}
 
-    def closure_rec(self, target, deps):
-        if target in deps:
+    def closure_rec(self, target, deps, exclude):
+        if (
+            target in deps
+            or isinstance(target, (str, File, build.GeneratedList))
+            or any(x.match(target.name) for x in exclude)
+        ):
             return deps
-
-        if isinstance(target, build.GeneratedList):
-            return
 
         deps.add(target)
 
-        if hasattr(target, "get_dependencies"):
-            tgt_deps = target.get_dependencies()
-            for dep in tgt_deps:
-                self.closure_rec(dep, deps)
+        dependency_methods = [
+            "get_dependencies",
+            "get_target_dependencies",
+            "get_generated_sources",
+            "get_all_link_deps",
+        ]
 
-        if hasattr(target, "get_generated_sources"):
-            gen = target.get_generated_sources()
-            for dep in gen:
-                self.closure_rec(dep, deps)
-
-        if hasattr(target, "get_all_link_deps"):
-            for dep in target.get_all_link_deps():
-                self.closure_rec(dep, deps)
+        for method_name in dependency_methods:
+            if hasattr(target, method_name):
+                for dep in getattr(
+                    target, method_name
+                )():  # Call the method dynamically
+                    self.closure_rec(dep, deps, exclude)
 
         if hasattr(target, "objects"):
             for obj in target.objects:
                 if isinstance(obj, build.ExtractedObjects):
-                    self.closure_rec(obj.target, deps)
+                    self.closure_rec(obj.target, deps, exclude)
 
         return deps
 
-    @lru_cache(maxsize=None)
-    def closure(self, target):
+    def closure(self, target, exclude):
         deps = set()
-        return self.closure_rec(target, deps)
+        return self.closure_rec(target, deps, exclude)
 
     def get_target_generated_sources(self, target: build.BuildTarget) -> T.List[File]:
         """
@@ -127,6 +131,7 @@ class BazelBackend(Backend):
     @lru_cache(maxsize=None)
     def generate_target(self, target):
         if target.get_id() in self.processed_targets:
+            mlog.debug(f"Target {target.get_id()} has already been processed.")
             return
 
         self.processed_targets.add(target.get_id())
@@ -137,6 +142,8 @@ class BazelBackend(Backend):
         elif isinstance(target, build.CustomTargetIndex):
             self.custom_target_generator.generate(target.target)
         elif isinstance(target, build.StaticLibrary):
+            self.build_target_generator.generate(target)
+        elif isinstance(target, build.SharedLibrary):
             self.build_target_generator.generate(target)
         elif isinstance(target, build.Executable):
             self.build_target_generator.generate(target)
@@ -151,9 +158,14 @@ class BazelBackend(Backend):
             / f"{platform.system().lower()}-{platform.machine().lower()}"
         )
         self.resolver = PathResolver(
-            self.source_dir, Path(shadow_dir).absolute(), self.build_dir, self.build_prefix
+            self.source_dir,
+            Path(shadow_dir).absolute(),
+            self.build_dir,
+            self.build_prefix,
         )
-        mlog.log(f"Using shadow: {shadow_dir}, build_prefix: {self.build_prefix} and build_dir: {self.build_dir}")
+        mlog.log(
+            f"Using shadow: {shadow_dir}, build_prefix: {self.build_prefix} and build_dir: {self.build_dir}"
+        )
         self.library = BazelRuleLibrary(self.shims)
         self.header_extractor = HeaderExtractor(shadow_dir, self.resolver)
         self.custom_target_generator = CustomTargetGenerator(
@@ -183,13 +195,16 @@ class BazelBackend(Backend):
 
         if missing:
             raise ValueError(
-                f"Missing shims for {missing}, please add it to your shim config"
+                f"Missing required shims for {missing}. "
+                f"Your current shim configuration includes: {shim_deps}. "
+                "Please update your configuration to include shims for the missing dependencies."
             )
 
     def write_results(self):
         out_dir = Path(self.build_dir) / self.shims.get("output_dir", "bazel")
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        mlog.log(f"Writing generated files to {out_dir}")
         # Copy all the generated config files
         platform_dir = out_dir / self.build_prefix
         platform_dir.mkdir(parents=True, exist_ok=True)
@@ -211,11 +226,8 @@ class BazelBackend(Backend):
             )
             outfile.write("# It was autogenerated by the Meson build system.\n")
             outfile.write("# Using the experimental bazel build plugin.\n")
-            if platform.system() == "Windows":
-                outfile.write("# WARNING! WARNING! WARNING! WARNING! WARNING! WARNING! WARNING! WARNING! WARNING! WARNING! WARNING! WARNING!\n")
-                outfile.write("# This was generated under windows, running buildifier on this file could break this build\n")
-                outfile.write("# As windows is not using a sandbox, we rely on the declared includej order.\n")
-                outfile.write("# WARNING! WARNING! WARNING! WARNING! WARNING! WARNING! WARNING! WARNING! WARNING! WARNING! WARNING! WARNING!\n")
+            outfile.write(f"# It targets {platform.system().lower()}-{platform.machine().lower()}\n")
+            outfile.write("\n")
             outfile.write(self.shims.get("bazel_prefix", ""))
             outfile.write("\n")
 
@@ -223,7 +235,6 @@ class BazelBackend(Backend):
 
             outfile.write(self.shims.get("bazel_postfix", ""))
             outfile.write("\n")
-
 
     def generate(
         self, capture: bool = False, vslite_ctx: dict = None
@@ -246,9 +257,16 @@ class BazelBackend(Backend):
         self.header_extractor.build_external_dependency_map(targets)
 
         exports = self.shims.get("export", name_to_target.keys())
+        exclude = [re.compile(x) for x in self.shims.get("exclude", [])]
         export_targets = set()
         for export in exports:
-            export_targets.update(self.closure(name_to_target[export]))
+            if export not in name_to_target:
+                mlog.warning(f"Target {export} does not exist")
+                continue
+
+            target = name_to_target[export]
+            closure = self.closure(target, exclude)
+            export_targets.update(closure)
 
         # Let's order the targets, so runs progress in the same fashion.
         export_targets = sorted(
@@ -256,8 +274,8 @@ class BazelBackend(Backend):
         )
 
         for target in export_targets:
-            if target.name not in self.shims.get("exclude", []):
-                self.generate_target(target)
+            mlog.log(f"Converting {target.name} ({type(target)})")
+            self.generate_target(target)
 
         self.library.post_process_rules()
         self.library.apply_shims()

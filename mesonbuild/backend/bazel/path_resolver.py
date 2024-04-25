@@ -198,22 +198,23 @@ class PathResolver:
             # Okay, we now have an absolute path that exists.
             # Let's see if we are case 1
             if resolved.is_relative_to(self.source_dir):
-                if self.DEBUG_LOG: mlog.debug(f"{resolved}.is_relative_to({self.source_dir}) (self.source_dir)")
+                if self.DEBUG_LOG: mlog.debug(f"!! {resolved}.is_relative_to({self.source_dir}) (self.source_dir)")
                 return resolved.relative_to(self.source_dir)
             if resolved.is_relative_to(self.shadow_dir):
-                if self.DEBUG_LOG: mlog.debug(f"{resolved}.is_relative_to({self.shadow_dir}) (self.shadow_dir)")
+                if self.DEBUG_LOG: mlog.debug(f"!! {resolved}.is_relative_to({self.shadow_dir}) (self.shadow_dir)")
                 relative = resolved.relative_to(self.shadow_dir)
 
                 # Case 2? Does it exist in our build dir?
                 if Path.joinpath(self.build_dir, relative).exists():
-                    if self.DEBUG_LOG: mlog.debug(f"Path.joinpath({self.build_dir}, {relative}).exists():")
+                    if self.DEBUG_LOG: mlog.debug(f"!! Path.joinpath({self.build_dir}, {relative}).exists():")
                     return self.build_prefix / relative
 
                 # This will be generated.
+                if self.DEBUG_LOG: mlog.debug(f"!! Generated {relative}")
                 return relative
 
             if resolved.is_relative_to(self.build_dir):
-                if self.DEBUG_LOG: mlog.debug(f"{resolved}.is_relative_to({self.build_dir}) (self.build_dir):")
+                if self.DEBUG_LOG: mlog.debug(f"!! {resolved}.is_relative_to({self.build_dir}) (self.build_dir):")
                 relative = resolved.relative_to(self.shadow_dir)
                 return self.build_prefix / relative
 
@@ -225,7 +226,12 @@ class PathResolver:
 
         # Ok we have a relative path.. It could exist in our source dir:
         if Path.joinpath(self.source_dir, p).exists():
-            return p
+            simplified = self.resolve_symlink_path(Path.joinpath(self.source_dir, p))
+            if simplified.is_relative_to(self.source_dir):
+                if self.DEBUG_LOG: mlog.debug(f"!! relative path to source {simplified.relative_to(self.source_dir)}")
+                # Simplify the path..
+                return simplified.relative_to(self.source_dir)
+
 
         # Let's resolve it from the build dir and see where we end up
         resolved_from_shadow = self.resolve_symlink_path(
