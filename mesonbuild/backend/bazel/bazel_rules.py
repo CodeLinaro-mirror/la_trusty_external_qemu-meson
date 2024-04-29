@@ -88,7 +88,7 @@ class BazelRule:
             if isinstance(v, set) or isinstance(v, OrderedSet):
                 v = [x for x in v]
             if v:
-                if k == 'includes':
+                if k == "includes":
                     # Make sure we don't re-order the includes
                     # Windows relies on this.
                     bazel_cmd += "   # buildifier: leave-alone\n"
@@ -107,7 +107,7 @@ class ExtractionRule(BazelRule):
 
 class BazelRuleLibrary:
 
-    DEBUG_LOG = False
+    DEBUG_LOG = True
 
     def __init__(self, shims: {}):
         self.library = {}
@@ -122,7 +122,7 @@ class BazelRuleLibrary:
 
     def register(self, rule: BazelRule) -> BazelRule:
         if self.DEBUG_LOG:
-            mlog.log(f"Registering {rule.name} -> {rule}")
+            mlog.debug(f"Registering {rule.name} -> {rule}")
         if rule.name in self.library:
             raise ValueError(f"Rule {rule.name} has been registered already")
 
@@ -186,67 +186,73 @@ class BazelRuleLibrary:
         for parent, children in rules.items():
             self._rebalance(parent, children)
 
-    def apply_shims(self):
-        rule_regex_to_shim: T.Dict[re.Pattern, T.Dict[str, str]] = {}
-        for shim in self.shims.get("shims", []):
+    def _compile_shim_targets(
+        self, shims: T.List[T.Dict[str, str]]
+    ) -> T.Dict[re.Pattern, T.List[T.Dict[str, str]]]:
+        rule_regex_to_shim = {}
+        for shim in shims:
             if "target" in shim:
-                rule_regex_to_shim[re.compile(shim["target"])] = shim.get("shims", {})
+                regex = re.compile(shim["target"])
+                rule_regex_to_shim.setdefault(regex, []).append(shim.get("shims", {}))
+        return rule_regex_to_shim
+
+    def _apply_removal_shims(self, rule, param: str, shim_entries: T.Set[str]):
+        if param in rule.params:
+            to_remove = {
+                entry
+                for entry in rule.params[param]
+                for shim_entry in shim_entries
+                if re.match(shim_entry, entry)
+            }
+            rule.params[param] -= to_remove
+
+    def _apply_addition_shims(self, rule, param: str, shim_entries: T.Set[str]):
+        rule.params.setdefault(param, OrderedSet()).update(shim_entries)
+
+    def _apply_replacement_shims(
+        self, rule, param: str, shim_entries: T.Union[T.Set[str], str]
+    ):
+        rule.params[param] = (
+            OrderedSet(shim_entries) if isinstance(shim_entries, list) else shim_entries
+        )
+
+    def apply_shims(self):
+        rule_regex_to_shim = self._compile_shim_targets(self.shims.get("shims", []))
 
         for regex, shims in rule_regex_to_shim.items():
             for name, rule in self.library.items():
                 if regex.match(name):
-                    # Now let's see if we have the right type
-                    restrict = shims.get("restrict_to", ".*")
-                    if not re.match(restrict, rule.sort):
-                        if self.DEBUG_LOG:
-                            mlog.debug(
-                                f"Shim is restricted_to: {restrict}, ignoring {rule.sort}"
-                            )
-                        continue
-
-                    if self.DEBUG_LOG:
-                        mlog.debug(f"Shimming {rule.sort}(name = '{name}')")
-                    # Okay, let's shim this rule:
-                    for shim in shims.keys():
-                        if shim == "restrict_to":
+                    for shim_dict in shims:
+                        restrict_to = shim_dict.get("restrict_to", r".*")
+                        if not re.match(restrict_to, rule.sort):
+                            if self.DEBUG_LOG:
+                                mlog.debug(
+                                    f"Shim is restricted_to: {restrict_to}, ignoring {rule.sort}"
+                                )
                             continue
 
-                        to_shim = shims[shim]
-                        if shim.startswith("-"):
-                            # remove an entry matching the regex
-                            param = shim[1:]
-                            if self.DEBUG_LOG:
-                                mlog.debug(f"Removal shim for: {param}")
-                            if param in rule.params:
-                                to_clean = OrderedSet()
-                                for entry in rule.params[param]:
-                                    for shim_entry in to_shim:
-                                        if re.match(shim_entry, entry):
-                                            if self.DEBUG_LOG:
-                                                mlog.debug(
-                                                    f"Removing {entry} from {param}"
-                                                )
-                                            to_clean.add(entry)
+                        if self.DEBUG_LOG:
+                            mlog.debug(f"Shimming {rule.sort}(name = '{name}')")
 
-                                rule.params[param] = rule.params[param].difference(
-                                    to_clean
-                                )
+                        for shim_key, shim_value in shim_dict.items():
+                            if shim_key == "restrict_to":
+                                continue
 
-                        elif shim.startswith("+"):
-                            # add an entry matching
-                            param = shim[1:]
-                            if self.DEBUG_LOG:
-                                mlog.debug(f"Adding shim for: {param}")
-                            if param not in rule.params:
-                                rule.params[param] = OrderedSet()
+                            if shim_key.startswith("-"):
+                                param = shim_key[1:]
+                                if self.DEBUG_LOG:
+                                    mlog.debug(f"Removal shim for: {param}")
+                                self._apply_removal_shims(rule, param, shim_value)
 
-                            for entry in to_shim:
-                                rule.params[param].add(entry)
+                            elif shim_key.startswith("+"):
+                                param = shim_key[1:]
+                                if self.DEBUG_LOG:
+                                    mlog.debug(f"Adding shim for: {param}")
+                                self._apply_addition_shims(rule, param, shim_value)
 
-                        else:
-                            if self.DEBUG_LOG:
-                                mlog.debug(f"Replacement shim for: {shim}")
-                            if isinstance(shim, str):
-                                rule.params[shim] = to_shim
                             else:
-                                rule.params[shim] = OrderedSet(to_shim)
+                                if self.DEBUG_LOG:
+                                    mlog.debug(f"Replacement shim for: {shim_key}")
+                                self._apply_replacement_shims(
+                                    rule, shim_key, shim_value
+                                )
