@@ -284,6 +284,7 @@ class CustomTargetGenerator:
                     "tools": tools,
                     "outs": sorted([x for x in outs]),
                     "cmd": " ".join(cmd),
+                    "cmd_bat": " ".join(cmd),
                 },
             )
         )
@@ -360,6 +361,7 @@ class GeneratedListGenerator(CustomTargetGenerator):
                         "tools": tools,
                         "outs": [sole_output],
                         "cmd": " ".join(cmdlist),
+                        "cmd_bat": " ".join(cmdlist),
                     },
                 )
             )

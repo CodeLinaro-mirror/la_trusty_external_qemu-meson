@@ -263,7 +263,6 @@ class BazelBackend(Backend):
             if export not in name_to_target:
                 mlog.warning(f"Target {export} does not exist")
                 continue
-
             target = name_to_target[export]
             closure = self.closure(target, exclude)
             export_targets.update(closure)
