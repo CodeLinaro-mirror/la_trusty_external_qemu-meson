@@ -458,8 +458,10 @@ class BuildTargetGenerator:
         return extended_deps
 
     def generate(self, target: build.StaticLibrary) -> BazelRule:
-        if self.library.is_registered(target.name):
-            return self.library.get(target.name)
+        label = meson_target_as_bazel_label(target)
+        if self.library.is_registered(label):
+            mlog.log(f"Target {target} has already been registered as {label}")
+            return self.library.get(label)
 
         if target.name == "qemu-aarch64-softmmu":
             pass
@@ -494,7 +496,9 @@ class BuildTargetGenerator:
         cc_data, objc_data = self._process_results(results, target)
         cc_data.linkopts += self.apple_frameworks(target)
         objc_data.linkopts += self.apple_frameworks(target)
-        cc_data.deps.update([meson_target_as_bazel_label(x) for x in target.get_dependencies()])
+        cc_data.deps.update(
+            [meson_target_as_bazel_label(x) for x in target.get_dependencies()]
+        )
         objc_data.deps.update(
             [meson_target_as_bazel_label(x) for x in target.get_dependencies()]
         )
