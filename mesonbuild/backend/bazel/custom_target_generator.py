@@ -130,7 +130,9 @@ class CustomTargetGenerator:
         )
 
     def create_resource_rule(self, target):
-        mlog.warning("Creating windows_resources, this will require windows_resources.bzl")
+        mlog.warning(
+            "Creating windows_resources, this will require windows_resources.bzl"
+        )
         return self.library.register(
             BazelRule(
                 "windows_resources",
@@ -146,11 +148,20 @@ class CustomTargetGenerator:
             )
         )
 
+    def build_outputs(self, outputs: T.Set[str]):
+        cmd = ["ninja", "-C", str(self.resolver.shadow_dir)]
+        cmd += [output for output in outputs]
+        try:
+            subprocess.check_call(cmd)
+        except subprocess.SubprocessError as se:
+            mlog.warning(f"Failed to generate {outputs} due to {se}")
+
     def generate(self, target: build.CustomTarget) -> BazelRule:
         if self.library.is_registered(target.name):
             return self.library.get(target.name)
 
-        if self.DEBUG_LOG: mlog.debug(f"custom_target_command_as_bazel({target.name}) ")
+        if self.DEBUG_LOG:
+            mlog.debug(f"custom_target_command_as_bazel({target.name}) ")
 
         # Check to see if this could be a py_binary:
         # -> the command starts with a python interpreter, 2nd is a .py file
@@ -169,7 +180,8 @@ class CustomTargetGenerator:
                 mlog.warning(
                     f"Rule {rule.name} is invalid, not generating {target.name}"
                 )
-                if self.DEBUG_LOG: mlog.debug(f"Broken rule {rule}")
+                if self.DEBUG_LOG:
+                    mlog.debug(f"Broken rule {rule}")
                 return
 
             cmds.pop(0)
@@ -184,7 +196,8 @@ class CustomTargetGenerator:
                 mlog.warning(
                     f"Rule {rule.name} is invalid, not generating {target.name}"
                 )
-                if self.DEBUG_LOG: mlog.debug(f"Broken rule {rule}")
+                if self.DEBUG_LOG:
+                    mlog.debug(f"Broken rule {rule}")
                 return
 
             cmds[0] = f"$(location :{rule.name})"
@@ -202,6 +215,10 @@ class CustomTargetGenerator:
 
         outdir = Path(self.backend.get_custom_target_output_dir(target))
         outs = set([Path.joinpath(outdir, i).as_posix() for i in target.get_outputs()])
+        # Next let's make sure these are generated in the shadow directory, so the build generator
+        # can consume the generated sources
+        self.build_outputs(outs)
+
         outputs = [f"$(location {i})" for i in outs]
         inputs = [
             self.resolver.find(x).as_posix()
@@ -214,14 +231,17 @@ class CustomTargetGenerator:
             cmds.append(f"> {outputs[0]}")
 
         # Evaluate the command list
-        if self.DEBUG_LOG: mlog.debug(f"     outputs: {outputs}")
-        if self.DEBUG_LOG: mlog.debug(f"     inputs:  {inputs}")
+        if self.DEBUG_LOG:
+            mlog.debug(f"     outputs: {outputs}")
+        if self.DEBUG_LOG:
+            mlog.debug(f"     inputs:  {inputs}")
 
         cmd: T.List[str] = []
         for i in cmds:
             if isinstance(i, build.BuildTarget):
                 tgt = as_bazel_label(i.name)
-                if self.DEBUG_LOG: mlog.debug(f"     i-> build.BuildTarget:: {i}")
+                if self.DEBUG_LOG:
+                    mlog.debug(f"     i-> build.BuildTarget:: {i}")
                 cmd += f"$(location {tgt})"
                 tools.append(f"{tgt}")
                 continue
@@ -229,10 +249,12 @@ class CustomTargetGenerator:
                 # GIR scanner will attempt to execute this binary but
                 # it assumes that it is in path, so always give it a full path.
                 i = i.get_outputs()[0]
-                if self.DEBUG_LOG: mlog.debug(f"     i-> build.CustomTarget:: {i}")
+                if self.DEBUG_LOG:
+                    mlog.debug(f"     i-> build.CustomTarget:: {i}")
             elif isinstance(i, File):
                 i = f"$(location {self.resolver.find(i)})"
-                if self.DEBUG_LOG: mlog.debug(f"     i-> File: {i}")
+                if self.DEBUG_LOG:
+                    mlog.debug(f"     i-> File: {i}")
 
             elif isinstance(i, str):
                 if any(
@@ -253,13 +275,15 @@ class CustomTargetGenerator:
                 # and use location!
                 if os.path.exists(i):
                     if os.path.isfile(i):
-                        if self.DEBUG_LOG: mlog.debug(f"     i-> str resolving: {i}")
+                        if self.DEBUG_LOG:
+                            mlog.debug(f"     i-> str resolving: {i}")
                         f = self.resolver.find(i)
                         i = f"$(location {f.as_posix()})"
                         srcs.add(f.as_posix())
                     else:
                         i = "$(RULEDIR)"
-                if self.DEBUG_LOG: mlog.debug(f"     i-> str: {i}")
+                if self.DEBUG_LOG:
+                    mlog.debug(f"     i-> str: {i}")
 
             else:
                 raise RuntimeError(f"Argument {i} is of unknown type {type(i)}")
@@ -269,11 +293,14 @@ class CustomTargetGenerator:
 
         # Substitute the rest of the template strings
         values = get_filenames_templates_dict(inputs, outputs)
-        if self.DEBUG_LOG: mlog.debug(f"     values: {values}")
-        if self.DEBUG_LOG: mlog.debug(f"     subst: {cmd}")
+        if self.DEBUG_LOG:
+            mlog.debug(f"     values: {values}")
+        if self.DEBUG_LOG:
+            mlog.debug(f"     subst: {cmd}")
         cmd = substitute_values(cmd, values)
         cmd = [i.replace("\\", "/") for i in cmd]
-        if self.DEBUG_LOG: mlog.debug(f"     subst: {cmd}")
+        if self.DEBUG_LOG:
+            mlog.debug(f"     subst: {cmd}")
 
         return self.library.register(
             BazelRule(
@@ -291,8 +318,14 @@ class CustomTargetGenerator:
 
 
 class GeneratedListGenerator(CustomTargetGenerator):
-    def name(target: build.GeneratedList) -> str:
-        return "gen-unique-name"
+
+    def build_outputs(self, outputs: T.Set[str]):
+        cmd = ["ninja", "-C", str(self.resolver.shadow_dir)]
+        cmd += [output for output in outputs]
+        try:
+            subprocess.check_call(cmd, )
+        except subprocess.SubprocessError as se:
+            mlog.warning(f"Failed to generate {outputs} due to {se}")
 
     def create_py_binary(self, target: programs.ExternalProgram):
         """Creates a py_binary rule if needed for this target."""
@@ -339,7 +372,7 @@ class GeneratedListGenerator(CustomTargetGenerator):
 
             infilename = self.resolver.find(curfile).as_posix()
             args = generator.get_arglist(infilename)
-
+            self.build_outputs([sole_output])
             args = [
                 x.replace("@INPUT@", f"$(location {infilename})").replace(
                     "@OUTPUT@", f"$(location {sole_output})"
