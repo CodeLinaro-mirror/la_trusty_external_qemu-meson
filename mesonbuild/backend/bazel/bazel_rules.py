@@ -238,6 +238,11 @@ class BazelRuleLibrary:
                             if shim_key == "restrict_to":
                                 continue
 
+                            # Change the type of this rule, from cc_binary -> cc_interface_binary etc..
+                            if shim_key == "_bzl_type":
+                                rule.sort = shim_value
+                                continue
+
                             if shim_key.startswith("-"):
                                 param = shim_key[1:]
                                 if self.DEBUG_LOG:

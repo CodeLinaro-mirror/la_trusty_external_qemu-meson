@@ -324,13 +324,14 @@ class BuildTargetGenerator:
     def _generate_shared_library(self, target, cc_data):
         return self.library.register(
             BazelRule(
-                "cc_shared_library",
+                "cc_binary",
                 {
                     "name": target.name,
                     "srcs": OrderedSet(
                         [x for x in cc_data.compiled_sources]
                         + [x for x in cc_data.hdrs]
                     ),
+                    "linkshared": True,
                     # TODO: Figure out what to do with these
                     # "copts": OrderedSet(cc_data.warnings).union(cc_data.fopts),
                     "linkopts": OrderedSet(cc_data.linkopts),
