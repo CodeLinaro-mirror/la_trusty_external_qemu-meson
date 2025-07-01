@@ -96,15 +96,6 @@ class BazelRule:
         return f"{self.sort}({bazel_cmd})"
 
 
-class ExtractionRule(BazelRule):
-    def __init__(self, params, deps):
-        super().__init__("cc_library", params)
-        self.deps = deps
-
-    def copy(self):
-        return ExtractionRule(self.params.copy(), self.deps.copy())
-
-
 class BazelRuleLibrary:
 
     DEBUG_LOG = True
@@ -120,6 +111,16 @@ class BazelRuleLibrary:
             updated_deps.update(ext_shims.get(d, [d]))
         rule.params["deps"] = updated_deps
 
+    def _fix_dep_prefix(self, rule: BazelRule):
+        updated_deps = OrderedSet()
+        for d in sorted(rule.params["deps"]):
+            if d[0] in ("@", "/", ":"):
+                updated_deps.add(d)
+            else:
+                # If the target is relative then lets be clearer about that.
+                updated_deps.add(":{}".format(d))
+        rule.params["deps"] = updated_deps
+
     def register(self, rule: BazelRule) -> BazelRule:
         if self.DEBUG_LOG:
             mlog.debug(f"Registering {rule.name} -> {rule}")
@@ -129,6 +130,7 @@ class BazelRuleLibrary:
         self.library[rule.name] = rule
         if "deps" in rule.params:
             self._apply_dep_shims(rule)
+            self._fix_dep_prefix(rule)
 
         return rule
 
@@ -148,43 +150,6 @@ class BazelRuleLibrary:
 
             stream.write(str(target))
             stream.write("\n")
-
-    def _extraction_rules(self) -> T.List[ExtractionRule]:
-        return [x for x in self.library.values() if isinstance(x, ExtractionRule)]
-
-    def _rebalance(self, parent, children):
-        parent_rule = self.library[parent]
-        sources = parent_rule.params["srcs"]
-        if self.DEBUG_LOG:
-            mlog.debug(f"REBalancing: {parent} - {len(sources)}:  {sources}")
-
-        for child in children:
-            child_rule = self.library[child]
-            child_sources = child_rule.deps[parent]
-            if child_sources == sources:
-                # No need to create a target, just take a dependency
-                child_rule.params["deps"].add(parent_rule.name)
-                continue
-
-            new_intermediate = parent_rule.copy()
-            new_intermediate.params["name"] = f"{child_rule.name}_{parent_rule.name}"
-            new_intermediate.params["srcs"] = OrderedSet(child_sources)
-            child_rule.params["deps"].add(new_intermediate.params["name"])
-            self.register(new_intermediate)
-
-    def post_process_rules(self):
-        # First we find all the rules from which dependencies select
-        # objects.
-        extraction_rules = self._extraction_rules()
-        rules = {}
-        for ex_rule in extraction_rules:
-            for target in ex_rule.deps.keys():
-                if target not in rules:
-                    rules[target] = OrderedSet()
-                rules[target].add(ex_rule.name)
-
-        for parent, children in rules.items():
-            self._rebalance(parent, children)
 
     def _compile_shim_targets(
         self, shims: T.List[T.Dict[str, str]]

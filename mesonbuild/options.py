@@ -1376,7 +1376,8 @@ class OptionStore:
                     #
                     # Some base options (sanitizers etc) might get added later.
                     # Permitting them all is not strictly correct.
-                    if key.subproject is None and not self.is_compiler_option(key) and not self.is_base_option(key):
+                    # TODO(whollins): The is_backend_option addition here is not necessary when we update to v1.8.1.
+                    if key.subproject is None and not self.is_compiler_option(key) and not self.is_base_option(key) and not self.is_backend_option(key):
                         raise MesonException(f'Unknown options: "{keystr}"')
                     self.pending_options[key] = valstr
 

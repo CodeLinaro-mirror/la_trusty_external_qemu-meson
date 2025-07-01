@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import os
 import typing as T
+from itertools import chain
 from pathlib import Path
 
 from ... import build, mlog
 from ...compilers import compilers
-from ...dependencies.pkgconfig import PkgConfigDependency
 from ...dependencies.platform import AppleFrameworks
 from ...mesonlib import (
     File,
@@ -33,7 +33,6 @@ from ..backends import Backend
 from .bazel_rules import (
     BazelRule,
     BazelRuleLibrary,
-    ExtractionRule,
     meson_target_as_bazel_label,
 )
 from .header_extractor import HeaderExtractor
@@ -88,12 +87,10 @@ class BuildTargetGenerator:
         self,
         library: BazelRuleLibrary,
         backend: Backend,
-        resolver: PathResolver,
         header_extractor: HeaderExtractor,
     ):
         self.library = library
         self.backend = backend
-        self.resolver = resolver
         self.header_extractor = header_extractor
 
     def generate_inc_dir(
@@ -257,6 +254,7 @@ class BuildTargetGenerator:
 
         return link_args
 
+    # TODO make this faster somehow - parallelise?
     def process_source(self, src, target):
         cc, args = self.generate_compile_commands_for_file(target, src)
 
@@ -287,15 +285,15 @@ class BuildTargetGenerator:
                 "objc_library",
                 {
                     "name": self._darwin_subname(target),
-                    "srcs": OrderedSet(sorted([x for x in objc_data.compiled_sources])),
-                    "hdrs": OrderedSet(sorted([x for x in objc_data.hdrs])),
+                    "srcs": OrderedSet(sorted(objc_data.compiled_sources)),
+                    "hdrs": OrderedSet(sorted(objc_data.hdrs)),
                     "deps": OrderedSet(sorted(objc_data.deps)),
                     # TODO: Figure out what to do with these
                     # "copts": OrderedSet(objc_data.warnings).union(objc_data.fopts),
-                    "defines": OrderedSet(objc_data.defines),
-                    "linkopts": OrderedSet(objc_data.linkopts),
+                    "defines": OrderedSet(sorted(objc_data.defines)),
+                    "linkopts": OrderedSet(sorted(objc_data.linkopts)),
                     "alwayslink": hasattr(target, "alwayslink") and target.alwayslink,
-                    "includes": OrderedSet(objc_data.includes),
+                    "includes": OrderedSet(sorted(objc_data.includes)),
                 },
             )
         )
@@ -307,15 +305,14 @@ class BuildTargetGenerator:
                 {
                     "name": target.name,
                     "srcs": OrderedSet(
-                        [x for x in cc_data.compiled_sources]
-                        + [x for x in cc_data.hdrs]
+                        sorted(chain(cc_data.compiled_sources, cc_data.hdrs))
                     ),
                     # TODO: Figure out what to do with these
                     # "copts": OrderedSet(cc_data.warnings).union(cc_data.fopts),
-                    "linkopts": OrderedSet(cc_data.linkopts),
-                    "deps": OrderedSet(cc_data.deps),
-                    "defines": OrderedSet(cc_data.defines),
-                    "includes": OrderedSet(cc_data.includes),
+                    "linkopts": OrderedSet(sorted(cc_data.linkopts)),
+                    "deps": OrderedSet(sorted(cc_data.deps)),
+                    "defines": OrderedSet(sorted(cc_data.defines)),
+                    "includes": OrderedSet(sorted(cc_data.includes)),
                 },
             )
         )
@@ -327,16 +324,15 @@ class BuildTargetGenerator:
                 {
                     "name": target.name,
                     "srcs": OrderedSet(
-                        [x for x in cc_data.compiled_sources]
-                        + [x for x in cc_data.hdrs]
+                        sorted(chain(cc_data.compiled_sources, cc_data.hdrs))
                     ),
                     "linkshared": True,
                     # TODO: Figure out what to do with these
                     # "copts": OrderedSet(cc_data.warnings).union(cc_data.fopts),
-                    "linkopts": OrderedSet(cc_data.linkopts),
-                    "deps": OrderedSet(cc_data.deps),
-                    "defines": OrderedSet(cc_data.defines),
-                    "includes": OrderedSet(cc_data.includes),
+                    "linkopts": OrderedSet(sorted(cc_data.linkopts)),
+                    "deps": OrderedSet(sorted(cc_data.deps)),
+                    "defines": OrderedSet(sorted(cc_data.defines)),
+                    "includes": OrderedSet(sorted(cc_data.includes)),
                 },
             )
         )
@@ -344,21 +340,21 @@ class BuildTargetGenerator:
     def _darwin_subname(self, target):
         return f"internal_{target.name}_darwin"
 
-    def _generate_extraction_rule(self, target, cc_data, extended_deps):
+    def _generate_static_library(self, target, cc_data):
         return self.library.register(
-            ExtractionRule(
+            BazelRule(
+                "cc_library",
                 {
                     "name": meson_target_as_bazel_label(target),
                     "alwayslink": hasattr(target, "alwayslink") and target.alwayslink,
-                    "srcs": OrderedSet([x for x in cc_data.compiled_sources]),
-                    "hdrs": OrderedSet([x for x in cc_data.hdrs]),
-                    "deps": OrderedSet(cc_data.deps),
+                    "srcs": OrderedSet(sorted(cc_data.compiled_sources)),
+                    "hdrs": OrderedSet(sorted(cc_data.hdrs)),
+                    "deps": OrderedSet(sorted(cc_data.deps)),
                     # "copts": OrderedSet(cc_data.warnings).union(cc_data.fopts),
-                    "linkopts": OrderedSet(cc_data.linkopts),
-                    "defines": OrderedSet(cc_data.defines),
-                    "includes": OrderedSet(cc_data.includes),
+                    "linkopts": OrderedSet(sorted(cc_data.linkopts)),
+                    "defines": OrderedSet(sorted(cc_data.defines)),
+                    "includes": OrderedSet(sorted(cc_data.includes)),
                 },
-                extended_deps,
             )
         )
 
@@ -413,58 +409,11 @@ class BuildTargetGenerator:
 
         return cc_data, objc_data
 
-    def _get_extended_deps(self, target, cc_data, objc_data):
-        """Extracts extended dependencies from extracted objects.
-
-        Args:
-            target: The Meson build target being processed.
-            cc_data: TargetData object for C/C++ sources.
-            objc_data: TargetData object for Objective-C sources.
-
-        Returns:
-            A dictionary of extended dependencies, mapping target names to source lists.
-        """
-
-        extended_deps = {}
-        for obj in target.objects:
-            if isinstance(obj, build.ExtractedObjects):
-                mlog.debug(f"Extended {target} -E-> {obj.target.name}")
-
-                cpp_sources = [
-                    self.resolver.find(z).as_posix()
-                    for z in obj.srclist
-                    if not z.is_built and not self.is_objc_file(z)
-                ]
-                objc_sources = [
-                    self.resolver.find(z).as_posix()
-                    for z in obj.srclist
-                    if not z.is_built and self.is_objc_file(z)
-                ]
-
-                if cpp_sources:
-                    extended_deps[meson_target_as_bazel_label(obj.target)] = cpp_sources
-                    mlog.debug(
-                        f"Extended deps: {target.name} ==> {obj.target.name}:"
-                        f" {cpp_sources}"
-                    )
-
-                if objc_sources:
-                    tgt = self._darwin_subname(obj.target)
-                    extended_deps[tgt] = objc_sources
-                    mlog.debug(
-                        f"Extended deps: {target.name} ==> {tgt}: {objc_sources}"
-                    )
-
-        return extended_deps
-
     def generate(self, target: build.StaticLibrary) -> BazelRule:
         label = meson_target_as_bazel_label(target)
         if self.library.is_registered(label):
             mlog.log(f"Target {target} has already been registered as {label}")
             return self.library.get(label)
-
-        if target.name == "qemu-aarch64-softmmu":
-            pass
 
         if not any([c in target.compilers for c in self.supports]):
             raise MesonBugException(
@@ -503,7 +452,6 @@ class BuildTargetGenerator:
             [meson_target_as_bazel_label(x) for x in target.get_dependencies()]
         )
 
-        extended_deps = self._get_extended_deps(target, cc_data, objc_data)
         # Bazel will not be able to handle objc in a cc_ rule, instead we
         # will need to filter out the objc files, create an intermediate target
         # objc_ target and take a dependency on that.
@@ -532,4 +480,4 @@ class BuildTargetGenerator:
             return self._generate_shared_library(target, cc_data)
 
         if cc_data.compiled_sources:
-            return self._generate_extraction_rule(target, cc_data, extended_deps)
+            return self._generate_static_library(target, cc_data)

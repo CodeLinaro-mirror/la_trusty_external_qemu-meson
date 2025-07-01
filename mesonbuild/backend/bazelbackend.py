@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import datetime
+import copy
 import json
 import platform
 import re
@@ -75,34 +76,45 @@ class BazelBackend(Backend):
         if (
             target in deps
             or isinstance(target, (str, File, build.GeneratedList))
-            or any(x.match(target.name) for x in exclude)
         ):
             return deps
 
+        if any(x.match(target.name) for x in exclude):
+            mlog.log("  -", target.name)
+            return deps
+
+        if not isinstance(target, (build.CustomTarget, build.CustomTargetIndex)):
+            mlog.log("  +", type(target).__name__, ": ", target.name)
+
         deps.add(target)
 
-        dependency_methods = [
-            "get_dependencies",
-            "get_target_dependencies",
-            "get_generated_sources",
-            "get_all_link_deps",
-        ]
+        todo = []
+        if isinstance(target, build.BuildTarget):
+            for o in target.objects:
+                if isinstance(o.target, build.StaticLibrary):
+                    # Overwrite sources.
+                    newt = copy.deepcopy(o.target)
+                    newt.sources = o.srclist
+                    newt.generated = o.genlist
+                    newt.objects = o.objlist
+                    target.link_targets.append(newt)
 
-        for method_name in dependency_methods:
-            if hasattr(target, method_name):
-                for dep in getattr(
-                    target, method_name
-                )():  # Call the method dynamically
-                    self.closure_rec(dep, deps, exclude)
+            todo.extend(target.get_dependencies())
+            todo.extend(target.get_generated_sources())
+        elif isinstance(target, build.CustomTarget):
+            todo.extend(target.get_target_dependencies())
+        elif isinstance(target, build.CustomTargetIndex):
+            todo.append(target.target)
+        else:
+            raise NotImplementedError("Unknown target type: ", target)
 
-        if hasattr(target, "objects"):
-            for obj in target.objects:
-                if isinstance(obj, build.ExtractedObjects):
-                    self.closure_rec(obj.target, deps, exclude)
+        for dep in todo:
+            self.closure_rec(dep, deps, exclude)
 
         return deps
 
     def closure(self, target, exclude):
+        mlog.log("Getting dependency tree for (", type(target).__name__, ") ", target.name, ": ")
         deps = set()
         return self.closure_rec(target, deps, exclude)
 
@@ -135,6 +147,7 @@ class BazelBackend(Backend):
             mlog.debug(f"Target {target.get_id()} has already been processed.")
             return
 
+        mlog.log("--Generating ", type(target).__name__, ": ", target.name)
         self.processed_targets.add(target.get_id())
         self.generate_generator_list_rules(target)
 
@@ -174,7 +187,7 @@ class BazelBackend(Backend):
             self.library, self, self.resolver
         )
         self.build_target_generator = BuildTargetGenerator(
-            self.library, self, self.resolver, self.header_extractor
+            self.library, self, self.header_extractor
         )
 
     def verify_external_dependencies(
@@ -259,24 +272,55 @@ class BazelBackend(Backend):
 
         exports = self.shims.get("export", name_to_target.keys())
         exclude = [re.compile(x) for x in self.shims.get("exclude", [])]
-        export_targets = set()
+
+        export_targets = {}
+        library_sources = {}
+        clashes = set()
         for export in exports:
             if export not in name_to_target:
                 mlog.warning(f"Target {export} does not exist")
                 continue
             target = name_to_target[export]
             closure = self.closure(target, exclude)
-            export_targets.update(closure)
+            export_targets[export] = closure
+
+            for c in closure:
+                if isinstance(c, build.StaticLibrary):
+                    if c.name in library_sources:
+                            if set(c.sources) != library_sources[c.name]:
+                                mlog.log("sources disagree: ", c.name)
+                                clashes.add(c.name)
+                    else:
+                        library_sources[c.name] = set(c.sources)
+
+        combined_targets = {}
+        for export, closure in export_targets.items():
+            for c in closure:
+                # Sometimes the names are duplicated e.g. SharedModule and
+                # StaticLibrary with same name.
+                if c.get_id() in combined_targets:
+                    continue
+
+                if c.name in clashes:
+                    # As the target itself is referenced in the dependencies,
+                    # they will automatically update so no need to find all the
+                    # references.
+                    c.name = "{}_{}".format(c.name, export)
+                    # The id @lazy_property needs to be reset to account for the
+                    # new name.
+                    delattr(c, "id")
+                    mlog.log("---dealing with clash: ", c.name, " ", c.get_id())
+                combined_targets[c.get_id()] = c
 
         # Let's order the targets, so runs progress in the same fashion.
-        export_targets = sorted(
-            [t for t in export_targets], key=lambda target: str(target.name)
+        combined_targets = sorted(
+            [t for t in combined_targets.values()], key=lambda target: str(target.name)
         )
 
         leftover = []
         # First do generator targets
         mlog.log("Converting generator targets.")
-        for target in export_targets:
+        for target in combined_targets:
             if not isinstance(
                 target, (build.StaticLibrary, build.SharedLibrary, build.Executable)
             ):
@@ -289,7 +333,6 @@ class BazelBackend(Backend):
         for target in leftover:
             self.generate_target(target)
 
-        self.library.post_process_rules()
         self.library.apply_shims()
         self.write_results()
 

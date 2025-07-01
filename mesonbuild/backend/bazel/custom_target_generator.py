@@ -23,6 +23,7 @@ from ... import build, mlog, programs
 from ...mesonlib import (
     File,
     MesonBugException,
+    OrderedSet,
     get_filenames_templates_dict,
     substitute_values,
 )
@@ -111,20 +112,20 @@ class CustomTargetGenerator:
 
         # file_deps contains all the file dependencies
         # We need to split them into python and data files
-        srcs = [
+        srcs = OrderedSet(sorted(
             self.resolver.find(x).as_posix() for x in file_deps if x.endswith(".py")
-        ]
-        data = [
+            ))
+        data = OrderedSet(sorted(
             self.resolver.find(x).as_posix() for x in file_deps if not x.endswith(".py")
-        ]
+            ))
 
         return self.library.register(
             BazelRule(
                 "py_binary",
                 {
                     "name": prog,
-                    "data": set(data),
-                    "srcs": set(srcs),
+                    "data": data,
+                    "srcs": srcs,
                 },
             )
         )
@@ -225,7 +226,7 @@ class CustomTargetGenerator:
             for x in self.backend.get_custom_target_sources(target)
         ]
         srcs.update(inputs)
-        inputs = [f"$(location {s})" for s in inputs]
+        inputs = [f"$(location {s})" if os.path.isfile(s) else f"$(RULEDIR)/{s}" for s in inputs]
 
         if target.capture:
             cmds.append(f"> {outputs[0]}")
@@ -307,9 +308,9 @@ class CustomTargetGenerator:
                 "genrule",
                 {
                     "name": f"generate_{target.name}",
-                    "srcs": sorted([x for x in srcs]),
+                    "srcs": OrderedSet(sorted(srcs)),
                     "tools": tools,
-                    "outs": sorted([x for x in outs]),
+                    "outs": OrderedSet(sorted(outs)),
                     "cmd": " ".join(cmd),
                     "cmd_bat": " ".join(cmd),
                 },
@@ -342,7 +343,7 @@ class GeneratedListGenerator(CustomTargetGenerator):
                 "py_binary",
                 {
                     "name": prog,
-                    "srcs": [self.resolver.find(target.get_path()).as_posix()],
+                    "srcs": OrderedSet([self.resolver.find(target.get_path()).as_posix()]),
                 },
             )
         )
@@ -390,9 +391,9 @@ class GeneratedListGenerator(CustomTargetGenerator):
                     "genrule",
                     {
                         "name": rule_name,
-                        "srcs": [infilename],
+                        "srcs": OrderedSet([infilename]),
                         "tools": tools,
-                        "outs": [sole_output],
+                        "outs": OrderedSet([sole_output]),
                         "cmd": " ".join(cmdlist),
                         "cmd_bat": " ".join(cmdlist),
                     },
