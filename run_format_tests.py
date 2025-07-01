@@ -1,18 +1,6 @@
 #!/usr/bin/env python3
-
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2012-2019 The Meson development team
-
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 # some simple checks on the file format of:
 # - python code
@@ -64,6 +52,7 @@ def check_format() -> None:
         '.eggs', '_cache',              # e.g. .mypy_cache
         'venv',                         # virtualenvs have DOS line endings
         '120 rewrite',                  # we explicitly test for tab in meson.build file
+        '3 editorconfig',
     }
     for (root, _, filenames) in os.walk('.'):
         if any([x in root for x in skip_dirs]):
@@ -76,9 +65,12 @@ def check_format() -> None:
                 check_file(root / file)
 
 def check_symlinks():
+    # Test data must NOT contain symlinks. setup.py
+    # butchers them. If you need symlinks, they need
+    # to be created on the fly.
     for f in Path('test cases').glob('**/*'):
         if f.is_symlink():
-            if 'boost symlinks' in str(f):
+            if 'boost symlinks/boost/lib' in str(f):
                 continue
             raise SystemExit(f'Test data dir contains symlink: {f}.')
 

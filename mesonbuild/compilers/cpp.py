@@ -1,26 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2012-2017 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
-import copy
 import functools
 import os.path
 import typing as T
 
-from .. import coredata
+from .. import options
 from .. import mlog
-from ..mesonlib import MesonException, version_compare, OptionKey
+from ..mesonlib import MesonException, version_compare
 
 from .compilers import (
     gnu_winlibs,
@@ -29,14 +18,15 @@ from .compilers import (
     CompileCheckMode,
 )
 from .c_function_attributes import CXX_FUNC_ATTRIBUTES, C_FUNC_ATTRIBUTES
+from .mixins.apple import AppleCompilerMixin, AppleCPPStdsMixin
 from .mixins.clike import CLikeCompiler
 from .mixins.ccrx import CcrxCompiler
 from .mixins.ti import TICompiler
 from .mixins.arm import ArmCompiler, ArmclangCompiler
 from .mixins.visualstudio import MSVCCompiler, ClangClCompiler
-from .mixins.gnu import GnuCompiler, gnu_common_warning_args, gnu_cpp_warning_args
+from .mixins.gnu import GnuCompiler, GnuCPPStds, gnu_common_warning_args, gnu_cpp_warning_args
 from .mixins.intel import IntelGnuLikeCompiler, IntelVisualStudioLikeCompiler
-from .mixins.clang import ClangCompiler
+from .mixins.clang import ClangCompiler, ClangCPPStds
 from .mixins.elbrus import ElbrusCompiler
 from .mixins.pgi import PGICompiler
 from .mixins.emscripten import EmscriptenMixin
@@ -44,20 +34,20 @@ from .mixins.metrowerks import MetrowerksCompiler
 from .mixins.metrowerks import mwccarm_instruction_set_args, mwcceppc_instruction_set_args
 
 if T.TYPE_CHECKING:
-    from ..coredata import MutableKeyedOptionDictType, KeyedOptionDictType
+    from ..options import MutableKeyedOptionDictType
     from ..dependencies import Dependency
     from ..envconfig import MachineInfo
     from ..environment import Environment
     from ..linkers.linkers import DynamicLinker
     from ..mesonlib import MachineChoice
-    from ..programs import ExternalProgram
+    from ..build import BuildTarget
     CompilerMixinBase = CLikeCompiler
 else:
     CompilerMixinBase = object
 
-_ALL_STDS = ['c++98', 'c++0x', 'c++03', 'c++1y', 'c++1z', 'c++11', 'c++14', 'c++17', 'c++2a', 'c++20', 'c++23', 'c++26']
-_ALL_STDS += [f'gnu{std[1:]}' for std in _ALL_STDS]
-_ALL_STDS += ['vc++11', 'vc++14', 'vc++17', 'vc++20', 'vc++latest', 'c++latest']
+ALL_STDS = ['c++98', 'c++0x', 'c++03', 'c++1y', 'c++1z', 'c++11', 'c++14', 'c++17', 'c++2a', 'c++20', 'c++23', 'c++26']
+ALL_STDS += [f'gnu{std[1:]}' for std in ALL_STDS]
+ALL_STDS += ['vc++11', 'vc++14', 'vc++17', 'vc++20', 'vc++latest', 'c++latest']
 
 
 def non_msvc_eh_options(eh: str, args: T.List[str]) -> None:
@@ -77,14 +67,14 @@ class CPPCompiler(CLikeCompiler, Compiler):
     language = 'cpp'
 
     def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice, is_cross: bool,
-                 info: 'MachineInfo', exe_wrapper: T.Optional['ExternalProgram'] = None,
+                 info: 'MachineInfo',
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None):
         # If a child ObjCPP class has already set it, don't set it ourselves
         Compiler.__init__(self, ccache, exelist, version, for_machine, info,
                           is_cross=is_cross, linker=linker,
                           full_version=full_version)
-        CLikeCompiler.__init__(self, exe_wrapper)
+        CLikeCompiler.__init__(self)
 
     @classmethod
     def get_display_language(cls) -> str:
@@ -183,9 +173,9 @@ class CPPCompiler(CLikeCompiler, Compiler):
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
         opts = super().get_options()
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
+        key = self.form_compileropt_key('std')
         opts.update({
-            key: coredata.UserStdOption('C++', _ALL_STDS),
+            key: options.UserStdOption('cpp', ALL_STDS),
         })
         return opts
 
@@ -193,6 +183,13 @@ class CPPCompiler(CLikeCompiler, Compiler):
 class _StdCPPLibMixin(CompilerMixinBase):
 
     """Detect whether to use libc++ or libstdc++."""
+
+    def language_stdlib_provider(self, env: Environment) -> str:
+        # https://stackoverflow.com/a/31658120
+        header = 'version' if self.has_header('version', '', env)[0] else 'ciso646'
+        is_libcxx = self.has_header_symbol(header, '_LIBCPP_VERSION', '', env)[0]
+        lib = 'c++' if is_libcxx else 'stdc++'
+        return lib
 
     @functools.lru_cache(None)
     def language_stdlib_only_link_flags(self, env: Environment) -> T.List[str]:
@@ -213,33 +210,23 @@ class _StdCPPLibMixin(CompilerMixinBase):
         machine = env.machines[self.for_machine]
         assert machine is not None, 'for mypy'
 
-        # We need to determine whether to use libc++ or libstdc++. We can't
-        # really know the answer in most cases, only the most likely answer,
-        # because a user can install things themselves or build custom images.
-        search_order: T.List[str] = []
-        if machine.system in {'android', 'darwin', 'dragonfly', 'freebsd', 'netbsd', 'openbsd'}:
-            search_order = ['c++', 'stdc++']
-        else:
-            search_order = ['stdc++', 'c++']
-        for lib in search_order:
-            if self.find_library(lib, env, []) is not None:
-                return search_dirs + [f'-l{lib}']
+        lib = self.language_stdlib_provider(env)
+        if self.find_library(lib, env, []) is not None:
+            return search_dirs + [f'-l{lib}']
+
         # TODO: maybe a bug exception?
         raise MesonException('Could not detect either libc++ or libstdc++ as your C++ stdlib implementation.')
 
 
-class ClangCPPCompiler(_StdCPPLibMixin, ClangCompiler, CPPCompiler):
-
-    _CPP23_VERSION = '>=12.0.0'
-    _CPP26_VERSION = '>=17.0.0'
+class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler):
 
     def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice, is_cross: bool,
-                 info: 'MachineInfo', exe_wrapper: T.Optional['ExternalProgram'] = None,
+                 info: 'MachineInfo',
                  linker: T.Optional['DynamicLinker'] = None,
                  defines: T.Optional[T.Dict[str, str]] = None,
                  full_version: T.Optional[str] = None):
         CPPCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
-                             info, exe_wrapper, linker=linker, full_version=full_version)
+                             info, linker=linker, full_version=full_version)
         ClangCompiler.__init__(self, defines)
         default_warn_args = ['-Wall', '-Winvalid-pch']
         self.warn_args = {'0': [],
@@ -249,59 +236,105 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCompiler, CPPCompiler):
                           'everything': ['-Weverything']}
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
-        opts = CPPCompiler.get_options(self)
-        key = OptionKey('key', machine=self.for_machine, lang=self.language)
-        opts.update({
-            key.evolve('eh'): coredata.UserComboOption(
-                'C++ exception handling type.',
-                ['none', 'default', 'a', 's', 'sc'],
-                'default',
-            ),
-            key.evolve('rtti'): coredata.UserBooleanOption('Enable RTTI', True),
-        })
-        cppstd_choices = [
-            'c++98', 'c++03', 'c++11', 'c++14', 'c++17', 'c++1z', 'c++2a', 'c++20',
-        ]
-        if version_compare(self.version, self._CPP23_VERSION):
-            cppstd_choices.append('c++23')
-        if version_compare(self.version, self._CPP26_VERSION):
-            cppstd_choices.append('c++26')
-        std_opt = opts[key.evolve('std')]
-        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
-        std_opt.set_versions(cppstd_choices, gnu=True)
+        opts = super().get_options()
+
+        key = self.form_compileropt_key('eh')
+        opts[key] = options.UserComboOption(
+            self.make_option_name(key),
+            'C++ exception handling type.',
+            'default',
+            choices=['none', 'default', 'a', 's', 'sc'])
+
+        key = self.form_compileropt_key('rtti')
+        opts[key] = options.UserBooleanOption(
+            self.make_option_name(key),
+            'Enable RTTI',
+            True)
+
+        key = self.form_compileropt_key('debugstl')
+        opts[key] = options.UserBooleanOption(
+            self.make_option_name(key),
+            'STL debug mode',
+            False)
+
         if self.info.is_windows() or self.info.is_cygwin():
-            opts.update({
-                key.evolve('winlibs'): coredata.UserArrayOption(
-                    'Standard Win libraries to link against',
-                    gnu_winlibs,
-                ),
-            })
+            key = self.form_compileropt_key('winlibs')
+            opts[key] = options.UserStringArrayOption(
+                self.make_option_name(key),
+                'Standard Win libraries to link against',
+                gnu_winlibs)
         return opts
 
-    def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_compile_args(self, target: 'BuildTarget', env: 'Environment', subproject: T.Optional[str] = None) -> T.List[str]:
         args: T.List[str] = []
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        std = options[key]
-        if std.value != 'none':
-            args.append(self._find_best_cpp_std(std.value))
 
-        non_msvc_eh_options(options[key.evolve('eh')].value, args)
+        rtti = self.get_compileropt_value('rtti', env, target, subproject)
+        debugstl = self.get_compileropt_value('debugstl', env, target, subproject)
+        eh = self.get_compileropt_value('eh', env, target, subproject)
 
-        if not options[key.evolve('rtti')].value:
+        assert isinstance(rtti, bool)
+        assert isinstance(eh, str)
+        assert isinstance(debugstl, bool)
+
+        non_msvc_eh_options(eh, args)
+
+        if debugstl:
+            args.append('-D_GLIBCXX_DEBUG=1')
+
+            # We can't do _LIBCPP_DEBUG because it's unreliable unless libc++ was built with it too:
+            # https://discourse.llvm.org/t/building-a-program-with-d-libcpp-debug-1-against-a-libc-that-is-not-itself-built-with-that-define/59176/3
+            # Note that unlike _GLIBCXX_DEBUG, _MODE_DEBUG doesn't break ABI. It's just slow.
+            if version_compare(self.version, '>=18'):
+                args.append('-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_DEBUG')
+
+        if not rtti:
             args.append('-fno-rtti')
 
         return args
 
-    def get_option_link_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_std_args(self, target: BuildTarget, env: Environment, subproject: T.Optional[str] = None) -> T.List[str]:
+        args: T.List[str] = []
+        std = self.get_compileropt_value('std', env, target, subproject)
+        assert isinstance(std, str)
+        if std != 'none':
+            args.append(self._find_best_cpp_std(std))
+        return args
+
+    def get_option_link_args(self, target: 'BuildTarget', env: 'Environment', subproject: T.Optional[str] = None) -> T.List[str]:
         if self.info.is_windows() or self.info.is_cygwin():
             # without a typedict mypy can't understand this.
-            key = OptionKey('winlibs', machine=self.for_machine, lang=self.language)
-            libs = options[key].value.copy()
-            assert isinstance(libs, list)
+            retval = self.get_compileropt_value('winlibs', env, target, subproject)
+            assert isinstance(retval, list)
+            libs = retval[:]
             for l in libs:
                 assert isinstance(l, str)
             return libs
         return []
+
+    def get_assert_args(self, disable: bool, env: 'Environment') -> T.List[str]:
+        if disable:
+            return ['-DNDEBUG']
+
+        # Don't inject the macro if the compiler already has it pre-defined.
+        for macro in ['_GLIBCXX_ASSERTIONS', '_LIBCPP_HARDENING_MODE', '_LIBCPP_ENABLE_ASSERTIONS']:
+            if self.defines.get(macro) is not None:
+                return []
+
+        if self.language_stdlib_provider(env) == 'stdc++':
+            return ['-D_GLIBCXX_ASSERTIONS=1']
+        else:
+            if version_compare(self.version, '>=18'):
+                return ['-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST']
+            elif version_compare(self.version, '>=15'):
+                return ['-D_LIBCPP_ENABLE_ASSERTIONS=1']
+
+        return []
+
+    def get_pch_use_args(self, pch_dir: str, header: str) -> T.List[str]:
+        args = super().get_pch_use_args(pch_dir, header)
+        if version_compare(self.version, '>=11'):
+            return ['-fpch-instantiate-templates'] + args
+        return args
 
 
 class ArmLtdClangCPPCompiler(ClangCPPCompiler):
@@ -309,20 +342,25 @@ class ArmLtdClangCPPCompiler(ClangCPPCompiler):
     id = 'armltdclang'
 
 
-class AppleClangCPPCompiler(ClangCPPCompiler):
-
-    _CPP23_VERSION = '>=13.0.0'
-    # TODO: We don't know which XCode version will include LLVM 17 yet, so
-    # use something absurd.
-    _CPP26_VERSION = '>=99.0.0'
+class AppleClangCPPCompiler(AppleCompilerMixin, AppleCPPStdsMixin, ClangCPPCompiler):
+    pass
 
 
 class EmscriptenCPPCompiler(EmscriptenMixin, ClangCPPCompiler):
 
     id = 'emscripten'
 
+    # Emscripten uses different version numbers than Clang; `emcc -v` will show
+    # the Clang version number used as well (but `emcc --version` does not).
+    # See https://github.com/pyodide/pyodide/discussions/4762 for more on
+    # emcc <--> clang versions. Note, although earlier versions claim to be the
+    # Clang versions 12.0.0 and 17.0.0 required for these C++ standards, they
+    # only accept the flags in the later versions below.
+    _CPP23_VERSION = '>=2.0.10'
+    _CPP26_VERSION = '>=3.1.39'
+
     def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice, is_cross: bool,
-                 info: 'MachineInfo', exe_wrapper: T.Optional['ExternalProgram'] = None,
+                 info: 'MachineInfo',
                  linker: T.Optional['DynamicLinker'] = None,
                  defines: T.Optional[T.Dict[str, str]] = None,
                  full_version: T.Optional[str] = None):
@@ -331,15 +369,15 @@ class EmscriptenCPPCompiler(EmscriptenMixin, ClangCPPCompiler):
         if not version_compare(version, '>=1.39.19'):
             raise MesonException('Meson requires Emscripten >= 1.39.19')
         ClangCPPCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
-                                  info, exe_wrapper=exe_wrapper, linker=linker,
+                                  info, linker=linker,
                                   defines=defines, full_version=full_version)
 
-    def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_std_args(self, target: BuildTarget, env: Environment, subproject: T.Optional[str] = None) -> T.List[str]:
         args: T.List[str] = []
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        std = options[key]
-        if std.value != 'none':
-            args.append(self._find_best_cpp_std(std.value))
+        std = self.get_compileropt_value('std', env, target, subproject)
+        assert isinstance(std, str)
+        if std != 'none':
+            args.append(self._find_best_cpp_std(std))
         return args
 
 
@@ -349,11 +387,11 @@ class ArmclangCPPCompiler(ArmclangCompiler, CPPCompiler):
     '''
 
     def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice, is_cross: bool,
-                 info: 'MachineInfo', exe_wrapper: T.Optional['ExternalProgram'] = None,
+                 info: 'MachineInfo',
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None):
         CPPCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
-                             info, exe_wrapper, linker=linker, full_version=full_version)
+                             info, linker=linker, full_version=full_version)
         ArmclangCompiler.__init__(self)
         default_warn_args = ['-Wall', '-Winvalid-pch']
         self.warn_args = {'0': [],
@@ -363,43 +401,46 @@ class ArmclangCPPCompiler(ArmclangCompiler, CPPCompiler):
                           'everything': ['-Weverything']}
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
-        opts = CPPCompiler.get_options(self)
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        opts.update({
-            key.evolve('eh'): coredata.UserComboOption(
-                'C++ exception handling type.',
-                ['none', 'default', 'a', 's', 'sc'],
-                'default',
-            ),
-        })
+        opts = super().get_options()
+
+        key = self.form_compileropt_key('eh')
+        opts[key] = options.UserComboOption(
+            self.make_option_name(key),
+            'C++ exception handling type.',
+            'default',
+            choices=['none', 'default', 'a', 's', 'sc'])
+
+        key = self.form_compileropt_key('std')
         std_opt = opts[key]
-        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
+        assert isinstance(std_opt, options.UserStdOption), 'for mypy'
         std_opt.set_versions(['c++98', 'c++03', 'c++11', 'c++14', 'c++17'], gnu=True)
         return opts
 
-    def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_std_args(self, target: BuildTarget, env: Environment, subproject: T.Optional[str] = None) -> T.List[str]:
         args: T.List[str] = []
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        std = options[key]
-        if std.value != 'none':
-            args.append('-std=' + std.value)
+        std = self.get_compileropt_value('std', env, target, subproject)
+        assert isinstance(std, str)
+        if std != 'none':
+            args.append('-std=' + std)
 
-        non_msvc_eh_options(options[key.evolve('eh')].value, args)
+        eh = self.get_compileropt_value('eh', env, target, subproject)
+        assert isinstance(eh, str)
+        non_msvc_eh_options(eh, args)
 
         return args
 
-    def get_option_link_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_link_args(self, target: 'BuildTarget', env: 'Environment', subproject: T.Optional[str] = None) -> T.List[str]:
         return []
 
 
-class GnuCPPCompiler(_StdCPPLibMixin, GnuCompiler, CPPCompiler):
+class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
     def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice, is_cross: bool,
-                 info: 'MachineInfo', exe_wrapper: T.Optional['ExternalProgram'] = None,
+                 info: 'MachineInfo',
                  linker: T.Optional['DynamicLinker'] = None,
                  defines: T.Optional[T.Dict[str, str]] = None,
                  full_version: T.Optional[str] = None):
         CPPCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
-                             info, exe_wrapper, linker=linker, full_version=full_version)
+                             info, linker=linker, full_version=full_version)
         GnuCompiler.__init__(self, defines)
         default_warn_args = ['-Wall', '-Winvalid-pch']
         self.warn_args = {'0': [],
@@ -411,65 +452,92 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCompiler, CPPCompiler):
                                          self.supported_warn_args(gnu_cpp_warning_args))}
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        opts = CPPCompiler.get_options(self)
-        opts.update({
-            key.evolve('eh'): coredata.UserComboOption(
-                'C++ exception handling type.',
-                ['none', 'default', 'a', 's', 'sc'],
-                'default',
-            ),
-            key.evolve('rtti'): coredata.UserBooleanOption('Enable RTTI', True),
-            key.evolve('debugstl'): coredata.UserBooleanOption(
-                'STL debug mode',
-                False,
-            )
-        })
-        cppstd_choices = [
-            'c++98', 'c++03', 'c++11', 'c++14', 'c++17', 'c++1z',
-            'c++2a', 'c++20',
-        ]
-        if version_compare(self.version, '>=11.0.0'):
-            cppstd_choices.append('c++23')
-        if version_compare(self.version, '>=14.0.0'):
-            cppstd_choices.append('c++26')
-        std_opt = opts[key]
-        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
-        std_opt.set_versions(cppstd_choices, gnu=True)
+        opts = super().get_options()
+
+        key = self.form_compileropt_key('eh')
+        opts[key] = options.UserComboOption(
+            self.make_option_name(key),
+            'C++ exception handling type.',
+            'default',
+            choices=['none', 'default', 'a', 's', 'sc'])
+
+        key = self.form_compileropt_key('rtti')
+        opts[key] = options.UserBooleanOption(
+            self.make_option_name(key),
+            'Enable RTTI',
+            True)
+
+        key = self.form_compileropt_key('debugstl')
+        opts[key] = options.UserBooleanOption(
+            self.make_option_name(key),
+            'STL debug mode',
+            False)
+
         if self.info.is_windows() or self.info.is_cygwin():
-            opts.update({
-                key.evolve('winlibs'): coredata.UserArrayOption(
-                    'Standard Win libraries to link against',
-                    gnu_winlibs,
-                ),
-            })
+            key = key.evolve(name='cpp_winlibs')
+            opts[key] = options.UserStringArrayOption(
+                self.make_option_name(key),
+                'Standard Win libraries to link against',
+                gnu_winlibs)
+
         return opts
 
-    def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_compile_args(self, target: 'BuildTarget', env: 'Environment', subproject: T.Optional[str] = None) -> T.List[str]:
         args: T.List[str] = []
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        std = options[key]
-        if std.value != 'none':
-            args.append(self._find_best_cpp_std(std.value))
 
-        non_msvc_eh_options(options[key.evolve('eh')].value, args)
+        rtti = self.get_compileropt_value('rtti', env, target, subproject)
+        debugstl = self.get_compileropt_value('debugstl', env, target, subproject)
+        eh = self.get_compileropt_value('eh', env, target, subproject)
 
-        if not options[key.evolve('rtti')].value:
+        assert isinstance(rtti, bool)
+        assert isinstance(eh, str)
+        assert isinstance(debugstl, bool)
+
+        non_msvc_eh_options(eh, args)
+
+        if not rtti:
             args.append('-fno-rtti')
 
-        if options[key.evolve('debugstl')].value:
+        if debugstl:
             args.append('-D_GLIBCXX_DEBUG=1')
         return args
 
-    def get_option_link_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_std_args(self, target: BuildTarget, env: Environment, subproject: T.Optional[str] = None) -> T.List[str]:
+        args: T.List[str] = []
+        std = self.get_compileropt_value('std', env, target, subproject)
+        assert isinstance(std, str)
+        if std != 'none':
+            args.append(self._find_best_cpp_std(std))
+        return args
+
+    def get_option_link_args(self, target: 'BuildTarget', env: 'Environment', subproject: T.Optional[str] = None) -> T.List[str]:
         if self.info.is_windows() or self.info.is_cygwin():
             # without a typedict mypy can't understand this.
-            key = OptionKey('winlibs', machine=self.for_machine, lang=self.language)
-            libs = options[key].value.copy()
-            assert isinstance(libs, list)
+            retval = self.get_compileropt_value('winlibs', env, target, subproject)
+            assert isinstance(retval, list)
+            libs: T.List[str] = retval[:]
             for l in libs:
                 assert isinstance(l, str)
             return libs
+        return []
+
+    def get_assert_args(self, disable: bool, env: 'Environment') -> T.List[str]:
+        if disable:
+            return ['-DNDEBUG']
+
+        # Don't inject the macro if the compiler already has it pre-defined.
+        for macro in ['_GLIBCXX_ASSERTIONS', '_LIBCPP_HARDENING_MODE', '_LIBCPP_ENABLE_ASSERTIONS']:
+            if self.defines.get(macro) is not None:
+                return []
+
+        if self.language_stdlib_provider(env) == 'stdc++':
+            return ['-D_GLIBCXX_ASSERTIONS=1']
+        else:
+            if version_compare(self.version, '>=18'):
+                return ['-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST']
+            elif version_compare(self.version, '>=15'):
+                return ['-D_LIBCPP_ENABLE_ASSERTIONS=1']
+
         return []
 
     def get_pch_use_args(self, pch_dir: str, header: str) -> T.List[str]:
@@ -478,11 +546,11 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCompiler, CPPCompiler):
 
 class PGICPPCompiler(PGICompiler, CPPCompiler):
     def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice, is_cross: bool,
-                 info: 'MachineInfo', exe_wrapper: T.Optional['ExternalProgram'] = None,
+                 info: 'MachineInfo',
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None):
         CPPCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
-                             info, exe_wrapper, linker=linker, full_version=full_version)
+                             info, linker=linker, full_version=full_version)
         PGICompiler.__init__(self)
 
 
@@ -491,26 +559,50 @@ class NvidiaHPC_CPPCompiler(PGICompiler, CPPCompiler):
     id = 'nvidia_hpc'
 
     def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice, is_cross: bool,
-                 info: 'MachineInfo', exe_wrapper: T.Optional['ExternalProgram'] = None,
+                 info: 'MachineInfo',
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None):
         CPPCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
-                             info, exe_wrapper, linker=linker, full_version=full_version)
+                             info, linker=linker, full_version=full_version)
         PGICompiler.__init__(self)
+
+    def get_options(self) -> 'MutableKeyedOptionDictType':
+        opts = super().get_options()
+        cppstd_choices = [
+            'c++98', 'c++03', 'c++11', 'c++14', 'c++17', 'c++20', 'c++23',
+            'gnu++98', 'gnu++03', 'gnu++11', 'gnu++14', 'gnu++17', 'gnu++20'
+        ]
+        std_opt = opts[self.form_compileropt_key('std')]
+        assert isinstance(std_opt, options.UserStdOption), 'for mypy'
+        std_opt.set_versions(cppstd_choices)
+        return opts
 
 
 class ElbrusCPPCompiler(ElbrusCompiler, CPPCompiler):
     def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice, is_cross: bool,
-                 info: 'MachineInfo', exe_wrapper: T.Optional['ExternalProgram'] = None,
+                 info: 'MachineInfo',
                  linker: T.Optional['DynamicLinker'] = None,
                  defines: T.Optional[T.Dict[str, str]] = None,
                  full_version: T.Optional[str] = None):
         CPPCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
-                             info, exe_wrapper, linker=linker, full_version=full_version)
+                             info, linker=linker, full_version=full_version)
         ElbrusCompiler.__init__(self)
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
-        opts = CPPCompiler.get_options(self)
+        opts = super().get_options()
+
+        key = self.form_compileropt_key('eh')
+        opts[key] = options.UserComboOption(
+            self.make_option_name(key),
+            'C++ exception handling type.',
+            'default',
+            choices=['none', 'default', 'a', 's', 'sc'])
+
+        key = self.form_compileropt_key('debugstl')
+        opts[key] = options.UserBooleanOption(
+            self.make_option_name(key),
+            'STL debug mode',
+            False)
 
         cpp_stds = ['c++98']
         if version_compare(self.version, '>=1.20.00'):
@@ -528,20 +620,9 @@ class ElbrusCPPCompiler(ElbrusCompiler, CPPCompiler):
         if version_compare(self.version, '>=1.26.00'):
             cpp_stds += ['c++20']
 
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        opts.update({
-            key.evolve('eh'): coredata.UserComboOption(
-                'C++ exception handling type.',
-                ['none', 'default', 'a', 's', 'sc'],
-                'default',
-            ),
-            key.evolve('debugstl'): coredata.UserBooleanOption(
-                'STL debug mode',
-                False,
-            ),
-        })
+        key = self.form_compileropt_key('std')
         std_opt = opts[key]
-        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
+        assert isinstance(std_opt, options.UserStdOption), 'for mypy'
         std_opt.set_versions(cpp_stds, gnu=True)
         return opts
 
@@ -558,27 +639,35 @@ class ElbrusCPPCompiler(ElbrusCompiler, CPPCompiler):
                                         dependencies=dependencies)
 
     # Elbrus C++ compiler does not support RTTI, so don't check for it.
-    def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_compile_args(self, target: 'BuildTarget', env: 'Environment', subproject: T.Optional[str] = None) -> T.List[str]:
         args: T.List[str] = []
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        std = options[key]
-        if std.value != 'none':
-            args.append(self._find_best_cpp_std(std.value))
+        eh = self.get_compileropt_value('eh', env, target, subproject)
+        assert isinstance(eh, str)
 
-        non_msvc_eh_options(options[key.evolve('eh')].value, args)
+        non_msvc_eh_options(eh, args)
 
-        if options[key.evolve('debugstl')].value:
+        debugstl = self.get_compileropt_value('debugstl', env, target, subproject)
+        assert isinstance(debugstl, str)
+        if debugstl:
             args.append('-D_GLIBCXX_DEBUG=1')
+        return args
+
+    def get_option_std_args(self, target: BuildTarget, env: Environment, subproject: T.Optional[str] = None) -> T.List[str]:
+        args: T.List[str] = []
+        std = self.get_compileropt_value('std', env, target, subproject)
+        assert isinstance(std, str)
+        if std != 'none':
+            args.append(self._find_best_cpp_std(std))
         return args
 
 
 class IntelCPPCompiler(IntelGnuLikeCompiler, CPPCompiler):
     def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice, is_cross: bool,
-                 info: 'MachineInfo', exe_wrapper: T.Optional['ExternalProgram'] = None,
+                 info: 'MachineInfo',
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None):
         CPPCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
-                             info, exe_wrapper, linker=linker, full_version=full_version)
+                             info, linker=linker, full_version=full_version)
         IntelGnuLikeCompiler.__init__(self)
         self.lang_header = 'c++-header'
         default_warn_args = ['-Wall', '-w3', '-Wpch-messages']
@@ -589,7 +678,27 @@ class IntelCPPCompiler(IntelGnuLikeCompiler, CPPCompiler):
                           'everything': default_warn_args + ['-Wextra']}
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
-        opts = CPPCompiler.get_options(self)
+        opts = super().get_options()
+
+        key = self.form_compileropt_key('eh')
+        opts[key] = options.UserComboOption(
+            self.make_option_name(key),
+            'C++ exception handling type.',
+            'default',
+            choices=['none', 'default', 'a', 's', 'sc'])
+
+        key = self.form_compileropt_key('rtti')
+        opts[key] = options.UserBooleanOption(
+            self.make_option_name(key),
+            'Enable RTTI',
+            True)
+
+        key = self.form_compileropt_key('debugstl')
+        opts[key] = options.UserBooleanOption(
+            self.make_option_name(key),
+            'STL debug mode',
+            False)
+
         # Every Unix compiler under the sun seems to accept -std=c++03,
         # with the exception of ICC. Instead of preventing the user from
         # globally requesting C++03, we transparently remap it to C++98
@@ -606,40 +715,42 @@ class IntelCPPCompiler(IntelGnuLikeCompiler, CPPCompiler):
             c_stds += ['c++2a']
             g_stds += ['gnu++2a']
 
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        opts.update({
-            key.evolve('eh'): coredata.UserComboOption(
-                'C++ exception handling type.',
-                ['none', 'default', 'a', 's', 'sc'],
-                'default',
-            ),
-            key.evolve('rtti'): coredata.UserBooleanOption('Enable RTTI', True),
-            key.evolve('debugstl'): coredata.UserBooleanOption('STL debug mode', False),
-        })
-        std_opt = opts[key]
-        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
-        std_opt.set_versions(c_stds + g_stds)
+        self._update_language_stds(opts, c_stds + g_stds)
         return opts
 
-    def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_compile_args(self, target: 'BuildTarget', env: 'Environment', subproject: T.Optional[str] = None) -> T.List[str]:
         args: T.List[str] = []
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        std = options[key]
-        if std.value != 'none':
+
+        rtti = self.get_compileropt_value('rtti', env, target, subproject)
+        debugstl = self.get_compileropt_value('debugstl', env, target, subproject)
+        eh = self.get_compileropt_value('eh', env, target, subproject)
+
+        assert isinstance(rtti, bool)
+        assert isinstance(eh, str)
+        assert isinstance(debugstl, bool)
+
+        if eh == 'none':
+            args.append('-fno-exceptions')
+        if rtti:
+            args.append('-fno-rtti')
+        if debugstl:
+            args.append('-D_GLIBCXX_DEBUG=1')
+        return args
+
+    def get_option_std_args(self, target: BuildTarget, env: Environment, subproject: T.Optional[str] = None) -> T.List[str]:
+        args: T.List[str] = []
+        std = self.get_compileropt_value('std', env, target, subproject)
+        assert isinstance(std, str)
+        if std != 'none':
             remap_cpp03 = {
                 'c++03': 'c++98',
                 'gnu++03': 'gnu++98'
             }
-            args.append('-std=' + remap_cpp03.get(std.value, std.value))
-        if options[key.evolve('eh')].value == 'none':
-            args.append('-fno-exceptions')
-        if not options[key.evolve('rtti')].value:
-            args.append('-fno-rtti')
-        if options[key.evolve('debugstl')].value:
-            args.append('-D_GLIBCXX_DEBUG=1')
+            args.append('-std=' + remap_cpp03.get(std, std))
+
         return args
 
-    def get_option_link_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_link_args(self, target: 'BuildTarget', env: 'Environment', subproject: T.Optional[str] = None) -> T.List[str]:
         return []
 
 
@@ -666,59 +777,78 @@ class VisualStudioLikeCPPCompilerMixin(CompilerMixinBase):
         'c++latest': (False, "latest"),
     }
 
-    def get_option_link_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_link_args(self, target: 'BuildTarget', env: 'Environment', subproject: T.Optional[str] = None) -> T.List[str]:
         # need a typeddict for this
-        key = OptionKey('winlibs', machine=self.for_machine, lang=self.language)
-        return T.cast('T.List[str]', options[key].value[:])
+        key = self.form_compileropt_key('winlibs').evolve(subproject=subproject)
+        if target:
+            value = env.coredata.get_option_for_target(target, key)
+        else:
+            value = env.coredata.optstore.get_value_for(key)
+        return T.cast('T.List[str]', value)[:]
 
     def _get_options_impl(self, opts: 'MutableKeyedOptionDictType', cpp_stds: T.List[str]) -> 'MutableKeyedOptionDictType':
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        opts.update({
-            key.evolve('eh'): coredata.UserComboOption(
-                'C++ exception handling type.',
-                ['none', 'default', 'a', 's', 'sc'],
-                'default',
-            ),
-            key.evolve('rtti'): coredata.UserBooleanOption('Enable RTTI', True),
-            key.evolve('winlibs'): coredata.UserArrayOption(
-                'Windows libs to link against.',
-                msvc_winlibs,
-            ),
-        })
-        std_opt = opts[key]
-        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
+        opts = super().get_options()
+
+        key = self.form_compileropt_key('eh')
+        opts[key] = options.UserComboOption(
+            self.make_option_name(key),
+            'C++ exception handling type.',
+            'default',
+            choices=['none', 'default', 'a', 's', 'sc'])
+
+        key = self.form_compileropt_key('rtti')
+        opts[key] = options.UserBooleanOption(
+            self.make_option_name(key),
+            'Enable RTTI',
+            True)
+
+        key = self.form_compileropt_key('winlibs')
+        opts[key] = options.UserStringArrayOption(
+            self.make_option_name(key),
+            'Standard Win libraries to link against',
+            msvc_winlibs)
+
+        std_opt = opts[self.form_compileropt_key('std')]
+        assert isinstance(std_opt, options.UserStdOption), 'for mypy'
         std_opt.set_versions(cpp_stds)
         return opts
 
-    def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_compile_args(self, target: 'BuildTarget', env: 'Environment', subproject: T.Optional[str] = None) -> T.List[str]:
         args: T.List[str] = []
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
 
-        eh = options[key.evolve('eh')]
-        if eh.value == 'default':
+        eh = self.get_compileropt_value('eh', env, target, subproject)
+        rtti = self.get_compileropt_value('rtti', env, target, subproject)
+
+        assert isinstance(rtti, bool)
+        assert isinstance(eh, str)
+
+        if eh == 'default':
             args.append('/EHsc')
-        elif eh.value == 'none':
+        elif eh == 'none':
             args.append('/EHs-c-')
         else:
-            args.append('/EH' + eh.value)
+            args.append('/EH' + eh)
 
-        if not options[key.evolve('rtti')].value:
+        if not rtti:
             args.append('/GR-')
 
-        permissive, ver = self.VC_VERSION_MAP[options[key].value]
+        return args
 
+    def get_option_std_args(self, target: BuildTarget, env: Environment, subproject: T.Optional[str] = None) -> T.List[str]:
+        args: T.List[str] = []
+        std = self.get_compileropt_value('std', env, target, subproject)
+        assert isinstance(std, str)
+
+        permissive, ver = self.VC_VERSION_MAP[std]
         if ver is not None:
             args.append(f'/std:c++{ver}')
-
         if not permissive:
             args.append('/permissive-')
-
         return args
 
     def get_compiler_check_args(self, mode: CompileCheckMode) -> T.List[str]:
         # XXX: this is a hack because so much GnuLike stuff is in the base CPPCompiler class.
         return Compiler.get_compiler_check_args(self, mode)
-
 
 class CPP11AsCPP14Mixin(CompilerMixinBase):
 
@@ -727,25 +857,25 @@ class CPP11AsCPP14Mixin(CompilerMixinBase):
     This is a limitation of Clang and MSVC that ICL doesn't share.
     """
 
-    def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_std_args(self, target: BuildTarget, env: Environment, subproject: T.Optional[str] = None) -> T.List[str]:
         # Note: there is no explicit flag for supporting C++11; we attempt to do the best we can
         # which means setting the C++ standard version to C++14, in compilers that support it
         # (i.e., after VS2015U3)
         # if one is using anything before that point, one cannot set the standard.
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        if options[key].value in {'vc++11', 'c++11'}:
+        stdkey = self.form_compileropt_key('std').evolve(subproject=subproject)
+        if target is not None:
+            std = env.coredata.get_option_for_target(target, stdkey)
+        else:
+            std = env.coredata.optstore.get_value_for(stdkey)
+        if std in {'vc++11', 'c++11'}:
             mlog.warning(self.id, 'does not support C++11;',
                          'attempting best effort; setting the standard to C++14',
                          once=True, fatal=False)
-            # Don't mutate anything we're going to change, we need to use
-            # deepcopy since we're messing with members, and we can't simply
-            # copy the members because the option proxy doesn't support it.
-            options = copy.deepcopy(options)
-            if options[key].value == 'vc++11':
-                options[key].value = 'vc++14'
-            else:
-                options[key].value = 'c++14'
-        return super().get_option_compile_args(options)
+        original_args = super().get_option_std_args(target, env, subproject)
+        std_mapping = {'/std:c++11': '/std:c++14',
+                       '/std:c++14': '/std:vc++14'}
+        processed_args = [std_mapping.get(x, x) for x in original_args]
+        return processed_args
 
 
 class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixin, MSVCCompiler, CPPCompiler):
@@ -754,11 +884,10 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
 
     def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice,
                  is_cross: bool, info: 'MachineInfo', target: str,
-                 exe_wrapper: T.Optional['ExternalProgram'] = None,
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None):
         CPPCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
-                             info, exe_wrapper, linker=linker, full_version=full_version)
+                             info, linker=linker, full_version=full_version)
         MSVCCompiler.__init__(self, target)
 
         # By default, MSVC has a broken __cplusplus define that pretends to be c++98:
@@ -779,14 +908,12 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
             cpp_stds.extend(['c++20', 'vc++20'])
         return self._get_options_impl(super().get_options(), cpp_stds)
 
-    def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        if options[key].value != 'none' and version_compare(self.version, '<19.00.24210'):
+    def get_option_std_args(self, target: BuildTarget, env: Environment, subproject: T.Optional[str] = None) -> T.List[str]:
+        std = self.get_compileropt_value('std', env, target, subproject)
+        if std != 'none' and version_compare(self.version, '<19.00.24210'):
             mlog.warning('This version of MSVC does not support cpp_std arguments', fatal=False)
-            options = copy.copy(options)
-            options[key].value = 'none'
 
-        args = super().get_option_compile_args(options)
+        args = super().get_option_std_args(target, env, subproject)
 
         if version_compare(self.version, '<19.11'):
             try:
@@ -802,11 +929,10 @@ class ClangClCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixin, Cl
 
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
                  is_cross: bool, info: 'MachineInfo', target: str,
-                 exe_wrapper: T.Optional['ExternalProgram'] = None,
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None):
         CPPCompiler.__init__(self, [], exelist, version, for_machine, is_cross,
-                             info, exe_wrapper, linker=linker, full_version=full_version)
+                             info, linker=linker, full_version=full_version)
         ClangClCompiler.__init__(self, target)
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
@@ -818,16 +944,20 @@ class IntelClCPPCompiler(VisualStudioLikeCPPCompilerMixin, IntelVisualStudioLike
 
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
                  is_cross: bool, info: 'MachineInfo', target: str,
-                 exe_wrapper: T.Optional['ExternalProgram'] = None,
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None):
         CPPCompiler.__init__(self, [], exelist, version, for_machine, is_cross,
-                             info, exe_wrapper, linker=linker, full_version=full_version)
+                             info, linker=linker, full_version=full_version)
         IntelVisualStudioLikeCompiler.__init__(self, target)
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
-        # This has only been tested with version 19.0,
-        cpp_stds = ['none', 'c++11', 'vc++11', 'c++14', 'vc++14', 'c++17', 'vc++17', 'c++latest']
+        # This has only been tested with version 19.0, 2021.2.1, 2024.4.2 and 2025.0.1
+        if version_compare(self.version, '<2021.1.0'):
+            cpp_stds = ['none', 'c++11', 'vc++11', 'c++14', 'vc++14', 'c++17', 'vc++17', 'c++latest']
+        else:
+            cpp_stds = ['none', 'c++14', 'c++17', 'c++latest']
+        if version_compare(self.version, '>=2024.1.0'):
+            cpp_stds += ['c++20']
         return self._get_options_impl(super().get_options(), cpp_stds)
 
     def get_compiler_check_args(self, mode: CompileCheckMode) -> T.List[str]:
@@ -842,31 +972,31 @@ class IntelLLVMClCPPCompiler(IntelClCPPCompiler):
 
 class ArmCPPCompiler(ArmCompiler, CPPCompiler):
     def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice, is_cross: bool,
-                 info: 'MachineInfo', exe_wrapper: T.Optional['ExternalProgram'] = None,
+                 info: 'MachineInfo',
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None):
         CPPCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
-                             info, exe_wrapper, linker=linker, full_version=full_version)
+                             info, linker=linker, full_version=full_version)
         ArmCompiler.__init__(self)
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
-        opts = CPPCompiler.get_options(self)
-        std_opt = opts[OptionKey('std', machine=self.for_machine, lang=self.language)]
-        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
+        opts = super().get_options()
+        std_opt = self.form_compileropt_key('std')
+        assert isinstance(std_opt, options.UserStdOption), 'for mypy'
         std_opt.set_versions(['c++03', 'c++11'])
         return opts
 
-    def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_std_args(self, target: BuildTarget, env: Environment, subproject: T.Optional[str] = None) -> T.List[str]:
         args: T.List[str] = []
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        std = options[key]
-        if std.value == 'c++11':
+        std = self.get_compileropt_value('std', env, target, subproject)
+        assert isinstance(std, str)
+        if std == 'c++11':
             args.append('--cpp11')
-        elif std.value == 'c++03':
+        elif std == 'c++03':
             args.append('--cpp')
         return args
 
-    def get_option_link_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_link_args(self, target: 'BuildTarget', env: 'Environment', subproject: T.Optional[str] = None) -> T.List[str]:
         return []
 
     def get_compiler_check_args(self, mode: CompileCheckMode) -> T.List[str]:
@@ -875,19 +1005,16 @@ class ArmCPPCompiler(ArmCompiler, CPPCompiler):
 
 class CcrxCPPCompiler(CcrxCompiler, CPPCompiler):
     def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice, is_cross: bool,
-                 info: 'MachineInfo', exe_wrapper: T.Optional['ExternalProgram'] = None,
+                 info: 'MachineInfo',
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None):
         CPPCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
-                             info, exe_wrapper, linker=linker, full_version=full_version)
+                             info, linker=linker, full_version=full_version)
         CcrxCompiler.__init__(self)
 
     # Override CCompiler.get_always_args
     def get_always_args(self) -> T.List[str]:
         return ['-nologo', '-lang=cpp']
-
-    def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
-        return []
 
     def get_compile_only_args(self) -> T.List[str]:
         return []
@@ -895,7 +1022,7 @@ class CcrxCPPCompiler(CcrxCompiler, CPPCompiler):
     def get_output_args(self, outputname: str) -> T.List[str]:
         return [f'-output=obj={outputname}']
 
-    def get_option_link_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_link_args(self, target: 'BuildTarget', env: 'Environment', subproject: T.Optional[str] = None) -> T.List[str]:
         return []
 
     def get_compiler_check_args(self, mode: CompileCheckMode) -> T.List[str]:
@@ -903,65 +1030,68 @@ class CcrxCPPCompiler(CcrxCompiler, CPPCompiler):
 
 class TICPPCompiler(TICompiler, CPPCompiler):
     def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice, is_cross: bool,
-                 info: 'MachineInfo', exe_wrapper: T.Optional['ExternalProgram'] = None,
+                 info: 'MachineInfo',
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None):
         CPPCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
-                             info, exe_wrapper, linker=linker, full_version=full_version)
+                             info, linker=linker, full_version=full_version)
         TICompiler.__init__(self)
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
-        opts = CPPCompiler.get_options(self)
-        std_opt = opts[OptionKey('std', machine=self.for_machine, lang=self.language)]
-        assert isinstance(std_opt, coredata.UserStdOption), 'for mypy'
+        opts = super().get_options()
+        key = self.form_compileropt_key('std')
+        std_opt = opts[key]
+        assert isinstance(std_opt, options.UserStdOption), 'for mypy'
         std_opt.set_versions(['c++03'])
         return opts
 
-    def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_std_args(self, target: BuildTarget, env: Environment, subproject: T.Optional[str] = None) -> T.List[str]:
         args: T.List[str] = []
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        std = options[key]
-        if std.value != 'none':
-            args.append('--' + std.value)
+        std = self.get_compileropt_value('std', env, target, subproject)
+        assert isinstance(std, str)
+        if std != 'none':
+            args.append('--' + std)
         return args
 
     def get_always_args(self) -> T.List[str]:
         return []
 
-    def get_option_link_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_link_args(self, target: 'BuildTarget', env: 'Environment', subproject: T.Optional[str] = None) -> T.List[str]:
         return []
 
 class C2000CPPCompiler(TICPPCompiler):
     # Required for backwards compat with projects created before ti-cgt support existed
     id = 'c2000'
 
+class C6000CPPCompiler(TICPPCompiler):
+    id = 'c6000'
+
 class MetrowerksCPPCompilerARM(MetrowerksCompiler, CPPCompiler):
     id = 'mwccarm'
 
     def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice,
                  is_cross: bool, info: 'MachineInfo',
-                 exe_wrapper: T.Optional['ExternalProgram'] = None,
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None):
         CPPCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
-                             info, exe_wrapper, linker=linker, full_version=full_version)
+                             info, linker=linker, full_version=full_version)
         MetrowerksCompiler.__init__(self)
 
     def get_instruction_set_args(self, instruction_set: str) -> T.Optional[T.List[str]]:
         return mwccarm_instruction_set_args.get(instruction_set, None)
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
-        opts = CPPCompiler.get_options(self)
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        opts[key].choices = ['none']
+        opts = super().get_options()
+        self._update_language_stds(opts, [])
         return opts
 
-    def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_std_args(self, target: BuildTarget, env: Environment, subproject: T.Optional[str] = None) -> T.List[str]:
         args: T.List[str] = []
-        std = options[OptionKey('std', machine=self.for_machine, lang=self.language)]
-        if std.value != 'none':
+        std = self.get_compileropt_value('std', env, target, subproject)
+        assert isinstance(std, str)
+        if std != 'none':
             args.append('-lang')
-            args.append(std.value)
+            args.append(std)
         return args
 
 class MetrowerksCPPCompilerEmbeddedPowerPC(MetrowerksCompiler, CPPCompiler):
@@ -969,25 +1099,24 @@ class MetrowerksCPPCompilerEmbeddedPowerPC(MetrowerksCompiler, CPPCompiler):
 
     def __init__(self, ccache: T.List[str], exelist: T.List[str], version: str, for_machine: MachineChoice,
                  is_cross: bool, info: 'MachineInfo',
-                 exe_wrapper: T.Optional['ExternalProgram'] = None,
                  linker: T.Optional['DynamicLinker'] = None,
                  full_version: T.Optional[str] = None):
         CPPCompiler.__init__(self, ccache, exelist, version, for_machine, is_cross,
-                             info, exe_wrapper, linker=linker, full_version=full_version)
+                             info, linker=linker, full_version=full_version)
         MetrowerksCompiler.__init__(self)
 
     def get_instruction_set_args(self, instruction_set: str) -> T.Optional[T.List[str]]:
         return mwcceppc_instruction_set_args.get(instruction_set, None)
 
     def get_options(self) -> 'MutableKeyedOptionDictType':
-        opts = CPPCompiler.get_options(self)
-        key = OptionKey('std', machine=self.for_machine, lang=self.language)
-        opts[key].choices = ['none']
+        opts = super().get_options()
+        self._update_language_stds(opts, [])
         return opts
 
-    def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+    def get_option_std_args(self, target: BuildTarget, env: Environment, subproject: T.Optional[str] = None) -> T.List[str]:
         args: T.List[str] = []
-        std = options[OptionKey('std', machine=self.for_machine, lang=self.language)]
-        if std.value != 'none':
-            args.append('-lang ' + std.value)
+        std = self.get_compileropt_value('std', env, target, subproject)
+        assert isinstance(std, str)
+        if std != 'none':
+            args.append('-lang ' + std)
         return args

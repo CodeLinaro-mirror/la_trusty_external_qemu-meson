@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2019 The meson development team
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+
 from __future__ import annotations
 
 """Provides a mixin for shared code between C and C++ Emscripten compilers."""
@@ -18,9 +8,9 @@ from __future__ import annotations
 import os.path
 import typing as T
 
-from ... import coredata
+from ... import options
 from ... import mesonlib
-from ...mesonlib import OptionKey
+from ...options import OptionKey
 from ...mesonlib import LibType
 from mesonbuild.compilers.compilers import CompileCheckMode
 
@@ -60,20 +50,21 @@ class EmscriptenMixin(Compiler):
 
     def thread_link_flags(self, env: 'Environment') -> T.List[str]:
         args = ['-pthread']
-        count: int = env.coredata.options[OptionKey('thread_count', lang=self.language, machine=self.for_machine)].value
+        count = env.coredata.optstore.get_value(OptionKey(f'{self.language}_thread_count', machine=self.for_machine))
+        assert isinstance(count, int)
         if count:
             args.append(f'-sPTHREAD_POOL_SIZE={count}')
         return args
 
-    def get_options(self) -> 'coredata.MutableKeyedOptionDictType':
+    def get_options(self) -> options.MutableKeyedOptionDictType:
         opts = super().get_options()
-        key = OptionKey('thread_count', machine=self.for_machine, lang=self.language)
-        opts.update({
-            key: coredata.UserIntegerOption(
-                'Number of threads to use in web assembly, set to 0 to disable',
-                (0, None, 4),  # Default was picked at random
-            ),
-        })
+
+        key = OptionKey(f'{self.language}_thread_count', machine=self.for_machine)
+        opts[key] = options.UserIntegerOption(
+            self.make_option_name(key),
+            'Number of threads to use in web assembly, set to 0 to disable',
+            4,  # Default was picked at random
+            min_value=0)
 
         return opts
 

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2021 Intel Corporation
+# Copyright © 2021-2025 Intel Corporation
 
 """Helpers for strict type checking."""
 
@@ -11,11 +11,11 @@ from .. import compilers
 from ..build import (CustomTarget, BuildTarget,
                      CustomTargetIndex, ExtractedObjects, GeneratedList, IncludeDirs,
                      BothLibraries, SharedLibrary, StaticLibrary, Jar, Executable, StructuredSources)
-from ..coredata import UserFeatureOption
+from ..options import UserFeatureOption
 from ..dependencies import Dependency, InternalDependency
 from ..interpreterbase.decorators import KwargInfo, ContainerTypeInfo
 from ..mesonlib import (File, FileMode, MachineChoice, listify, has_path_sep,
-                        OptionKey, EnvironmentVariables)
+                        EnvironmentVariables)
 from ..programs import ExternalProgram
 
 # Helper definition for type checks that are `Optional[T]`
@@ -26,6 +26,7 @@ if T.TYPE_CHECKING:
 
     from ..build import ObjectTypes
     from ..interpreterbase import TYPE_var
+    from ..options import ElementaryOptionValues
     from ..mesonlib import EnvInitValueType
 
     _FullEnvInitValueType = T.Union[EnvironmentVariables, T.List[str], T.List[T.List[str]], EnvInitValueType, str, None]
@@ -144,8 +145,6 @@ def variables_validator(contents: T.Union[str, T.List[str], T.Dict[str, str]]) -
     for k, v in variables.items():
         if not k:
             return 'empty variable name'
-        if not v:
-            return 'empty variable value'
         if any(c.isspace() for c in k):
             return f'invalid whitespace in variable name {k!r}'
     return None
@@ -270,12 +269,12 @@ DEPFILE_KW: KwargInfo[T.Optional[str]] = KwargInfo(
     validator=lambda x: 'Depfile must be a plain filename with a subdirectory' if has_path_sep(x) else None
 )
 
-# TODO: CustomTargetIndex should be supported here as well
-DEPENDS_KW: KwargInfo[T.List[T.Union[BuildTarget, CustomTarget]]] = KwargInfo(
+DEPENDS_KW: KwargInfo[T.List[T.Union[BuildTarget, CustomTarget, CustomTargetIndex]]] = KwargInfo(
     'depends',
-    ContainerTypeInfo(list, (BuildTarget, CustomTarget)),
+    ContainerTypeInfo(list, (BuildTarget, CustomTarget, CustomTargetIndex)),
     listify=True,
     default=[],
+    since_values={CustomTargetIndex: '1.5.0'},
 )
 
 DEPEND_FILES_KW: KwargInfo[T.List[T.Union[str, File]]] = KwargInfo(
@@ -287,31 +286,18 @@ DEPEND_FILES_KW: KwargInfo[T.List[T.Union[str, File]]] = KwargInfo(
 
 COMMAND_KW: KwargInfo[T.List[T.Union[str, BuildTarget, CustomTarget, CustomTargetIndex, ExternalProgram, File]]] = KwargInfo(
     'command',
-    # TODO: should accept CustomTargetIndex as well?
     ContainerTypeInfo(list, (str, BuildTarget, CustomTarget, CustomTargetIndex, ExternalProgram, File), allow_empty=False),
     required=True,
     listify=True,
     default=[],
 )
 
-def _override_options_convertor(raw: T.Union[str, T.List[str], T.Dict[str, T.Union[str, int, bool, T.List[str]]]]) -> T.Dict[OptionKey, T.Union[str, int, bool, T.List[str]]]:
-    if isinstance(raw, str):
-        raw = [raw]
-    if isinstance(raw, list):
-        output: T.Dict[OptionKey, T.Union[str, int, bool, T.List[str]]] = {}
-        for each in raw:
-            k, v = split_equal_string(each)
-            output[OptionKey.from_string(k)] = v
-        return output
-    return {OptionKey.from_string(k): v for k, v in raw.items()}
 
-
-OVERRIDE_OPTIONS_KW: KwargInfo[T.Union[str, T.Dict[str, T.Union[str, int, bool, T.List[str]]], T.List[str]]] = KwargInfo(
+OVERRIDE_OPTIONS_KW: KwargInfo[T.Union[str, T.Dict[str, ElementaryOptionValues], T.List[str]]] = KwargInfo(
     'override_options',
     (str, ContainerTypeInfo(list, str), ContainerTypeInfo(dict, (str, int, bool, list))),
     default={},
     validator=_options_validator,
-    convertor=_override_options_convertor,
     since_values={dict: '1.2.0'},
 )
 
@@ -486,9 +472,7 @@ VARIABLES_KW: KwargInfo[T.Dict[str, str]] = KwargInfo(
 
 PRESERVE_PATH_KW: KwargInfo[bool] = KwargInfo('preserve_path', bool, default=False, since='0.63.0')
 
-TEST_KWS: T.List[KwargInfo] = [
-    KwargInfo('args', ContainerTypeInfo(list, (str, File, BuildTarget, CustomTarget, CustomTargetIndex)),
-              listify=True, default=[]),
+TEST_KWS_NO_ARGS: T.List[KwargInfo] = [
     KwargInfo('should_fail', bool, default=False),
     KwargInfo('timeout', int, default=30),
     KwargInfo('workdir', (str, NoneType), default=None,
@@ -503,6 +487,11 @@ TEST_KWS: T.List[KwargInfo] = [
     DEPENDS_KW.evolve(since='0.46.0'),
     KwargInfo('suite', ContainerTypeInfo(list, str), listify=True, default=['']),  # yes, a list of empty string
     KwargInfo('verbose', bool, default=False, since='0.62.0'),
+]
+
+TEST_KWS: T.List[KwargInfo] = TEST_KWS_NO_ARGS + [
+    KwargInfo('args', ContainerTypeInfo(list, (str, File, BuildTarget, CustomTarget, CustomTargetIndex, ExternalProgram)),
+              listify=True, default=[]),
 ]
 
 # Cannot have a default value because we need to check that rust_crate_type and
@@ -711,6 +700,12 @@ _EXCLUSIVE_EXECUTABLE_KWS: T.List[KwargInfo] = [
         (str, NoneType),
         convertor=lambda x: x.lower() if isinstance(x, str) else None,
         validator=_validate_win_subsystem,
+    ),
+    KwargInfo(
+        'android_exe_type',
+        (str, NoneType),
+        validator=in_set_validator({'application', 'executable'}),
+        since='1.8.0'
     ),
 ]
 

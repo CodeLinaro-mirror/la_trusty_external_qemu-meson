@@ -1,22 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2019 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-# This class contains the basic functionality needed to run any interpreter
-# or an interpreter-based tool.
 from __future__ import annotations
 
-from ..mesonlib import MesonException, OptionKey
+from ..mesonlib import MesonException
+from ..options import OptionKey
 from .. import mlog
 from pathlib import Path
 import typing as T
@@ -65,14 +53,14 @@ blacklist_cmake_defs = [
 ]
 
 def cmake_is_debug(env: 'Environment') -> bool:
-    if OptionKey('b_vscrt') in env.coredata.options:
-        is_debug = env.coredata.get_option(OptionKey('buildtype')) == 'debug'
-        if env.coredata.options[OptionKey('b_vscrt')].value in {'mdd', 'mtd'}:
+    if 'b_vscrt' in env.coredata.optstore:
+        is_debug = env.coredata.optstore.get_value_for('buildtype') == 'debug'
+        if env.coredata.optstore.get_value_for('b_vscrt') in {'mdd', 'mtd'}:
             is_debug = True
         return is_debug
     else:
         # Don't directly assign to is_debug to make mypy happy
-        debug_opt = env.coredata.get_option(OptionKey('debug'))
+        debug_opt = env.coredata.optstore.get_value_for('debug')
         assert isinstance(debug_opt, bool)
         return debug_opt
 
@@ -118,7 +106,7 @@ def _flags_to_list(raw: str) -> T.List[str]:
     return res
 
 def cmake_get_generator_args(env: 'Environment') -> T.List[str]:
-    backend_name = env.coredata.get_option(OptionKey('backend'))
+    backend_name = env.coredata.optstore.get_value_for(OptionKey('backend'))
     assert isinstance(backend_name, str)
     assert backend_name in backend_generator_map
     return ['-G', backend_generator_map[backend_name]]

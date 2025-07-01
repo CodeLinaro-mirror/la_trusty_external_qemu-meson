@@ -127,7 +127,7 @@ class BuildTargetGenerator:
     ) -> ImmutableListProtocol[str]:
         # Add compiler args and include paths from several sources; defaults,
         # build options, external dependencies, etc.
-        commands = self.backend.generate_basic_compiler_args(target, compiler, False)
+        commands = self.backend.generate_basic_compiler_args(target, compiler)
         # Add custom target dirs as includes automatically, but before
         # target-specific include directories.
         if target.implicit_include_directories:
@@ -186,7 +186,6 @@ class BuildTargetGenerator:
     def _generate_single_compile_base_args(
         self, target: build.BuildTarget, compiler: compilers.Compiler
     ) -> compilers.CompilerArgs:
-        base_proxy = target.get_options()
         # Create an empty commands list, and start adding arguments from
         # various sources in the order in which they must override each other
         commands = compiler.compiler_args()
@@ -195,7 +194,7 @@ class BuildTargetGenerator:
         # Add compiler args for compiling this target derived from 'base' build
         # options passed on the command-line, in default_options, etc.
         # These have the lowest priority.
-        commands += compilers.get_base_compile_args(base_proxy, compiler)
+        commands += compilers.get_base_compile_args(target, compiler, self.backend.environment)
         return commands
 
     def generate_compile_commands_for_file(

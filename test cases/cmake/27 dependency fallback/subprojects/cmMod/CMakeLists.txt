@@ -1,6 +1,6 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION ${CMAKE_VERSION})
 
-project(cmMod)
+project(cmMod VERSION 1.2.3)
 set(CMAKE_CXX_STANDARD 14)
 
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
@@ -12,7 +12,7 @@ target_compile_definitions(cmModLib++ PRIVATE MESON_MAGIC_FLAG=21)
 target_compile_definitions(cmModLib++ INTERFACE MESON_MAGIC_FLAG=42)
 
 # Test PCH support
-if(${CMAKE_VERSION} VERSION_GREATER_EQUAL "3.16.0")
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.16.0")
     target_precompile_headers(cmModLib++ PRIVATE "cpp_pch.hpp")
 endif()
 

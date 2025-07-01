@@ -176,7 +176,9 @@ class Runner:
         latest_version = info['versions'][0]
         new_branch, new_revision = latest_version.rsplit('-', 1)
         if new_branch != branch or new_revision != revision:
-            filename = self.wrap.filename if self.wrap.has_wrap else f'{self.wrap.filename}.wrap'
+            filename = self.wrap.original_filename
+            if not filename:
+                filename = os.path.join(self.wrap.subprojects_dir, f'{self.wrap.name}.wrap')
             update_wrap_file(filename, self.wrap.name,
                              new_branch, new_revision,
                              options.allow_insecure)
@@ -250,7 +252,7 @@ class Runner:
             # avoid any data lost by mistake.
             self.git_stash()
             self.git_output(['reset', '--hard', 'FETCH_HEAD'])
-            self.wrap_resolver.apply_patch()
+            self.wrap_resolver.apply_patch(self.wrap.name)
             self.wrap_resolver.apply_diff_files()
         except GitException as e:
             self.log('  -> Could not reset', mlog.bold(self.repo_dir), 'to', mlog.bold(revision))
@@ -322,7 +324,8 @@ class Runner:
                 self.log('  -> Not a git repository.')
                 self.log('Pass --reset option to delete directory and redownload.')
                 return False
-        revision = self.wrap.values.get('revision')
+        revision_val = self.wrap.values.get('revision')
+        revision = revision_val if revision_val.upper() != 'HEAD' else 'HEAD'
         url = self.wrap.values.get('url')
         push_url = self.wrap.values.get('push-url')
         if not revision or not url:
@@ -521,16 +524,10 @@ class Runner:
             return True
 
         if self.wrap.redirected:
-            redirect_file = Path(self.wrap.original_filename).resolve()
+            wrapfile = Path(self.wrap.original_filename).resolve()
             if options.confirm:
-                redirect_file.unlink()
-            mlog.log(f'Deleting {redirect_file}')
-
-        if self.wrap.type == 'redirect':
-            redirect_file = Path(self.wrap.filename).resolve()
-            if options.confirm:
-                redirect_file.unlink()
-            self.log(f'Deleting {redirect_file}')
+                wrapfile.unlink()
+            mlog.log(f'Deleting {wrapfile}')
 
         if options.include_cache:
             packagecache = Path(self.wrap_resolver.cachedir).resolve()
@@ -603,7 +600,7 @@ class Runner:
             if not os.path.isdir(self.repo_dir):
                 self.log('  -> Not downloaded yet')
                 return True
-            self.wrap_resolver.apply_patch()
+            self.wrap_resolver.apply_patch(self.wrap.name)
             return True
         if options.save:
             if 'patch_directory' not in self.wrap.values:

@@ -1,16 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2019 The Meson development team
+# Copyright © 2023-2025 Intel Corporation
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 from mesonbuild.templates.sampleimpl import FileImpl
@@ -21,16 +12,24 @@ hello_vala_template = '''void main (string[] args) {{
 }}
 '''
 
-hello_vala_meson_template = '''project('{project_name}', ['c', 'vala'],
-  version : '{version}')
+hello_vala_meson_template = '''project(
+  '{project_name}',
+  'vala',
+  meson_version : '>= {meson_version}',
+  version : '{version}',
+)
 
 dependencies = [
-    dependency('glib-2.0'),
-    dependency('gobject-2.0'),
+  dependency('glib-2.0'),
+  dependency('gobject-2.0'),{dependencies}
 ]
 
-exe = executable('{exe_name}', '{source_name}', dependencies : dependencies,
-  install : true)
+exe = executable(
+  '{exe_name}',
+  '{source_name}',
+  dependencies : dependencies,
+  install : true,
+)
 
 test('basic', exe)
 '''
@@ -56,29 +55,44 @@ public void main() {{
 }}
 '''
 
-lib_vala_meson_template = '''project('{project_name}', ['c', 'vala'],
-  version : '{version}')
+lib_vala_meson_template = '''project(
+  '{project_name}',
+  'vala',
+  meson_version : '>= {meson_version}',
+  version : '{version}',
+)
 
 dependencies = [
-    dependency('glib-2.0'),
-    dependency('gobject-2.0'),
+  dependency('glib-2.0'),
+  dependency('gobject-2.0'),{dependencies}
 ]
 
 # These arguments are only used to build the shared library
 # not the executables that use the library.
-shlib = shared_library('foo', '{source_file}',
-               dependencies: dependencies,
-               install: true,
-               install_dir: [true, true, true])
+lib = shared_library(
+  'foo',
+  '{source_file}',
+  dependencies : dependencies,
+  install : true,
+  install_dir : [true, true, true],
+)
 
-test_exe = executable('{test_exe_name}', '{test_source_file}', dependencies : dependencies,
-  link_with : shlib)
+test_exe = executable(
+  '{test_exe_name}',
+  '{test_source_file}',
+  dependencies : dependencies,
+  link_with : lib,
+)
 test('{test_name}', test_exe)
 
 # Make this library usable as a Meson subproject.
 {ltoken}_dep = declare_dependency(
-  include_directories: include_directories('.'),
-  link_with : shlib)
+  include_directories : include_directories('.'),
+  dependencies : dependencies,
+  link_with : lib,
+)
+meson.override_dependency('{project_name}', {ltoken}_dep)
+
 '''
 
 

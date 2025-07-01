@@ -164,6 +164,9 @@ methods:
     The method accepts negative values where negative `start` is relative to the end of
     string `len(string) - start` as well as negative `end`.
 
+    If `start` or `end` are out of bounds, the position of the closest character will be used.
+    If `start` is bigger than `end`, the result will be an empty substring.
+
   example: |
     ```meson
     # Similar to the Python str[start:end] syntax
@@ -178,6 +181,15 @@ methods:
     string = 'foobar'
     string.substring(-5, -3) # => 'oo'
     string.substring(1, -1) # => 'ooba'
+    ```
+
+    Example with out of bound values:
+
+    ```meson
+    string = 'foobar'
+    string.substring(64) # => ''
+    string.substring(0, 64) # => 'foobar'
+    string.substring(64, 0) # => ''
     ```
 
   optargs:
@@ -293,6 +305,12 @@ methods:
     ```
 
     It is best to be unambiguous and specify the full revision level to compare.
+
+    *Since 1.8.0* multiple versions can be compared:
+
+    ```meson
+    '3.6'.version_compare('>=3', '<4.0') == true
+    ```
 
   posargs:
     compare_string:

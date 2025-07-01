@@ -1,30 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2012-2020 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 """A library of random helper functionality."""
 
 from __future__ import annotations
 from pathlib import Path
 import argparse
+import ast
 import enum
 import sys
 import stat
 import time
 import abc
+import multiprocessing
 import platform, subprocess, operator, os, shlex, shutil, re
 import collections
-from functools import lru_cache, wraps, total_ordering
+from functools import lru_cache, wraps
 from itertools import tee
 from tempfile import TemporaryDirectory, NamedTemporaryFile
 import typing as T
@@ -32,6 +24,7 @@ import textwrap
 import pickle
 import errno
 import json
+import dataclasses
 
 from mesonbuild import mlog
 from .core import MesonException, HoldableObject
@@ -66,6 +59,7 @@ _U = T.TypeVar('_U')
 __all__ = [
     'GIT',
     'python_command',
+    'NoProjectVersion',
     'project_meson_versions',
     'SecondLevelHolder',
     'File',
@@ -76,9 +70,7 @@ __all__ = [
     'EnvironmentException',
     'FileOrString',
     'GitException',
-    'OptionKey',
     'dump_conf_header',
-    'OptionType',
     'OrderedSet',
     'PerMachine',
     'PerMachineDefaultable',
@@ -104,16 +96,17 @@ __all__ = [
     'default_sysconfdir',
     'detect_subprojects',
     'detect_vcs',
+    'determine_worker_count',
     'do_conf_file',
     'do_conf_str',
     'do_replacement',
-    'exe_exists',
     'expand_arguments',
     'extract_as_list',
     'first',
     'generate_list',
     'get_compiler_for_source',
     'get_filenames_templates_dict',
+    'get_rsp_threshold',
     'get_variable_regex',
     'get_wine_shortpath',
     'git',
@@ -132,13 +125,16 @@ __all__ = [
     'is_netbsd',
     'is_openbsd',
     'is_osx',
+    'is_parent_path',
     'is_qnx',
     'is_sunos',
     'is_windows',
     'is_wsl',
     'iter_regexin_iter',
     'join_args',
+    'lazy_property',
     'listify',
+    'listify_array_value',
     'partition',
     'path_is_in_root',
     'pickle_load',
@@ -168,16 +164,22 @@ __all__ = [
 ]
 
 
+class NoProjectVersion:
+    pass
+
 # TODO: this is such a hack, this really should be either in coredata or in the
 # interpreter
 # {subproject: project_meson_version}
-project_meson_versions: T.DefaultDict[str, str] = collections.defaultdict(str)
+project_meson_versions: T.Dict[str, T.Union[str, NoProjectVersion]] = {}
 
 
 from glob import glob
 
-if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-    # using a PyInstaller bundle, e.g. the MSI installed executable
+if getattr(sys, 'frozen', False):
+    # Using e.g. a PyInstaller bundle, such as the MSI installed executable.
+    # It is conventional for freeze programs to set this attribute to indicate
+    # that the program is self hosted, and for example there is no associated
+    # "python" executable.
     python_command = [sys.executable, 'runpython']
 else:
     python_command = [sys.executable]
@@ -398,19 +400,21 @@ class File(HoldableObject):
 
     @staticmethod
     @lru_cache(maxsize=None)
-    def from_source_file(source_root: str, subdir: str, fname: str) -> 'File':
+    def from_source_file(source_root: str, subdir: str, fname: str) -> File:
         if not os.path.isfile(os.path.join(source_root, subdir, fname)):
             raise MesonException(f'File {fname} does not exist.')
         return File(False, subdir, fname)
 
     @staticmethod
+    @lru_cache(maxsize=None)
     def from_built_file(subdir: str, fname: str) -> 'File':
         return File(True, subdir, fname)
 
     @staticmethod
+    @lru_cache(maxsize=None)
     def from_built_relative(relative: str) -> 'File':
         dirpart, fnamepart = os.path.split(relative)
-        return File(True, dirpart, fnamepart)
+        return File.from_built_file(dirpart, fnamepart)
 
     @staticmethod
     def from_absolute_file(fname: str) -> 'File':
@@ -477,6 +481,10 @@ def classify_unity_sources(compilers: T.Iterable['Compiler'], sources: T.Sequenc
     return compsrclist
 
 
+MACHINE_NAMES = ['build', 'host']
+MACHINE_PREFIXES = ['build.', '']
+
+
 class MachineChoice(enum.IntEnum):
 
     """Enum class representing one of the two abstract machine names used in
@@ -490,27 +498,24 @@ class MachineChoice(enum.IntEnum):
         return f'{self.get_lower_case_name()} machine'
 
     def get_lower_case_name(self) -> str:
-        return PerMachine('build', 'host')[self]
+        return MACHINE_NAMES[self.value]
 
     def get_prefix(self) -> str:
-        return PerMachine('build.', '')[self]
+        return MACHINE_PREFIXES[self.value]
 
 
+@dataclasses.dataclass(eq=False, order=False)
 class PerMachine(T.Generic[_T]):
-    def __init__(self, build: _T, host: _T) -> None:
-        self.build = build
-        self.host = host
+    build: _T
+    host: _T
 
     def __getitem__(self, machine: MachineChoice) -> _T:
-        return {
-            MachineChoice.BUILD:  self.build,
-            MachineChoice.HOST:   self.host,
-        }[machine]
+        return [self.build, self.host][machine.value]
 
     def __setitem__(self, machine: MachineChoice, val: _T) -> None:
         setattr(self, machine.get_lower_case_name(), val)
 
-    def miss_defaulting(self) -> "PerMachineDefaultable[T.Optional[_T]]":
+    def miss_defaulting(self) -> PerMachineDefaultable[T.Optional[_T]]:
         """Unset definition duplicated from their previous to None
 
         This is the inverse of ''default_missing''. By removing defaulted
@@ -528,10 +533,8 @@ class PerMachine(T.Generic[_T]):
         self.build = build
         self.host = host
 
-    def __repr__(self) -> str:
-        return f'PerMachine({self.build!r}, {self.host!r})'
 
-
+@dataclasses.dataclass(eq=False, order=False)
 class PerThreeMachine(PerMachine[_T]):
     """Like `PerMachine` but includes `target` too.
 
@@ -539,9 +542,8 @@ class PerThreeMachine(PerMachine[_T]):
     need to computer the `target` field so we don't bother overriding the
     `__getitem__`/`__setitem__` methods.
     """
-    def __init__(self, build: _T, host: _T, target: _T) -> None:
-        super().__init__(build, host)
-        self.target = target
+
+    target: _T
 
     def miss_defaulting(self) -> "PerThreeMachineDefaultable[T.Optional[_T]]":
         """Unset definition duplicated from their previous to None
@@ -563,29 +565,23 @@ class PerThreeMachine(PerMachine[_T]):
     def matches_build_machine(self, machine: MachineChoice) -> bool:
         return self.build == self[machine]
 
-    def __repr__(self) -> str:
-        return f'PerThreeMachine({self.build!r}, {self.host!r}, {self.target!r})'
 
-
+@dataclasses.dataclass(eq=False, order=False)
 class PerMachineDefaultable(PerMachine[T.Optional[_T]]):
     """Extends `PerMachine` with the ability to default from `None`s.
     """
-    def __init__(self, build: T.Optional[_T] = None, host: T.Optional[_T] = None) -> None:
-        super().__init__(build, host)
 
-    def default_missing(self) -> "PerMachine[_T]":
+    build: T.Optional[_T] = None
+    host: T.Optional[_T] = None
+
+    def default_missing(self) -> PerMachine[_T]:
         """Default host to build
 
         This allows just specifying nothing in the native case, and just host in the
         cross non-compiler case.
         """
-        freeze = PerMachine(self.build, self.host)
-        if freeze.host is None:
-            freeze.host = freeze.build
-        return freeze
-
-    def __repr__(self) -> str:
-        return f'PerMachineDefaultable({self.build!r}, {self.host!r})'
+        assert self.build is not None, 'Cannot fill in missing when all fields are empty'
+        return PerMachine(self.build, self.host if self.host is not None else self.build)
 
     @classmethod
     def default(cls, is_cross: bool, build: _T, host: _T) -> PerMachine[_T]:
@@ -602,28 +598,24 @@ class PerMachineDefaultable(PerMachine[T.Optional[_T]]):
         return m.default_missing()
 
 
+@dataclasses.dataclass(eq=False, order=False)
 class PerThreeMachineDefaultable(PerMachineDefaultable[T.Optional[_T]], PerThreeMachine[T.Optional[_T]]):
     """Extends `PerThreeMachine` with the ability to default from `None`s.
     """
-    def __init__(self) -> None:
-        PerThreeMachine.__init__(self, None, None, None)
 
-    def default_missing(self) -> "PerThreeMachine[T.Optional[_T]]":
+    target: T.Optional[_T] = None
+
+    def default_missing(self) -> PerThreeMachine[_T]:
         """Default host to build and target to host.
 
         This allows just specifying nothing in the native case, just host in the
         cross non-compiler case, and just target in the native-built
         cross-compiler case.
         """
-        freeze = PerThreeMachine(self.build, self.host, self.target)
-        if freeze.host is None:
-            freeze.host = freeze.build
-        if freeze.target is None:
-            freeze.target = freeze.host
-        return freeze
-
-    def __repr__(self) -> str:
-        return f'PerThreeMachineDefaultable({self.build!r}, {self.host!r}, {self.target!r})'
+        assert self.build is not None, 'Cannot default a PerMachine when all values are None'
+        host = self.host if self.host is not None else self.build
+        target = self.target if self.target is not None else host
+        return PerThreeMachine(self.build, host, target)
 
 
 def is_sunos() -> bool:
@@ -687,15 +679,6 @@ def is_qnx() -> bool:
 
 def is_aix() -> bool:
     return platform.system().lower() == 'aix'
-
-def exe_exists(arglist: T.List[str]) -> bool:
-    try:
-        if subprocess.run(arglist, timeout=10).returncode == 0:
-            return True
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    return False
-
 
 @lru_cache(maxsize=None)
 def darwin_get_object_archs(objpath: str) -> 'ImmutableListProtocol[str]':
@@ -764,40 +747,50 @@ def windows_detect_native_arch() -> str:
             raise EnvironmentException('Unable to detect native OS architecture')
     return arch
 
-def detect_vcs(source_dir: T.Union[str, Path]) -> T.Optional[T.Dict[str, str]]:
+@dataclasses.dataclass
+class VcsData:
+    name: str
+    cmd: str
+    repo_dir: str
+    get_rev: T.List[str]
+    rev_regex: str
+    dep: str
+    wc_dir: T.Optional[str] = None
+
+def detect_vcs(source_dir: T.Union[str, Path]) -> T.Optional[VcsData]:
     vcs_systems = [
-        {
-            'name': 'git',
-            'cmd': 'git',
-            'repo_dir': '.git',
-            'get_rev': 'git describe --dirty=+ --always',
-            'rev_regex': '(.*)',
-            'dep': '.git/logs/HEAD'
-        },
-        {
-            'name': 'mercurial',
-            'cmd': 'hg',
-            'repo_dir': '.hg',
-            'get_rev': 'hg id -i',
-            'rev_regex': '(.*)',
-            'dep': '.hg/dirstate'
-        },
-        {
-            'name': 'subversion',
-            'cmd': 'svn',
-            'repo_dir': '.svn',
-            'get_rev': 'svn info',
-            'rev_regex': 'Revision: (.*)',
-            'dep': '.svn/wc.db'
-        },
-        {
-            'name': 'bazaar',
-            'cmd': 'bzr',
-            'repo_dir': '.bzr',
-            'get_rev': 'bzr revno',
-            'rev_regex': '(.*)',
-            'dep': '.bzr'
-        },
+        VcsData(
+            name = 'git',
+            cmd = 'git',
+            repo_dir = '.git',
+            get_rev = ['git', 'describe', '--dirty=+', '--always'],
+            rev_regex = '(.*)',
+            dep = '.git/logs/HEAD',
+        ),
+        VcsData(
+            name = 'mercurial',
+            cmd = 'hg',
+            repo_dir = '.hg',
+            get_rev = ['hg', 'id', '-i'],
+            rev_regex = '(.*)',
+            dep= '.hg/dirstate',
+        ),
+        VcsData(
+            name = 'subversion',
+            cmd = 'svn',
+            repo_dir = '.svn',
+            get_rev = ['svn', 'info'],
+            rev_regex = 'Revision: (.*)',
+            dep = '.svn/wc.db',
+        ),
+        VcsData(
+            name = 'bazaar',
+            cmd = 'bzr',
+            repo_dir = '.bzr',
+            get_rev = ['bzr', 'revno'],
+            rev_regex = '(.*)',
+            dep = '.bzr',
+        ),
     ]
     if isinstance(source_dir, str):
         source_dir = Path(source_dir)
@@ -808,8 +801,10 @@ def detect_vcs(source_dir: T.Union[str, Path]) -> T.Optional[T.Dict[str, str]]:
     parent_paths_and_self.appendleft(source_dir)
     for curdir in parent_paths_and_self:
         for vcs in vcs_systems:
-            if Path.is_dir(curdir.joinpath(vcs['repo_dir'])) and shutil.which(vcs['cmd']):
-                vcs['wc_dir'] = str(curdir)
+            repodir = vcs.repo_dir
+            cmd = vcs.cmd
+            if curdir.joinpath(repodir).is_dir() and shutil.which(cmd):
+                vcs.wc_dir = str(curdir)
                 return vcs
     return None
 
@@ -823,21 +818,18 @@ def current_vs_supports_modules() -> bool:
         return True
     return vsver.startswith('16.9.0') and '-pre.' in vsver
 
+_VERSION_TOK_RE = re.compile(r'(\d+)|([a-zA-Z]+)')
+
 # a helper class which implements the same version ordering as RPM
 class Version:
     def __init__(self, s: str) -> None:
         self._s = s
 
-        # split into numeric, alphabetic and non-alphanumeric sequences
-        sequences1 = re.finditer(r'(\d+|[a-zA-Z]+|[^a-zA-Z\d]+)', s)
-
-        # non-alphanumeric separators are discarded
-        sequences2 = [m for m in sequences1 if not re.match(r'[^a-zA-Z\d]+', m.group(1))]
-
+        # extract numeric and alphabetic sequences
         # numeric sequences are converted from strings to ints
-        sequences3 = [int(m.group(1)) if m.group(1).isdigit() else m.group(1) for m in sequences2]
-
-        self._v = sequences3
+        self._v = [
+                int(m.group(1)) if m.group(1) else m.group(2)
+                for m in _VERSION_TOK_RE.finditer(s)]
 
     def __str__(self) -> str:
         return '{} (V={})'.format(self._s, str(self._v))
@@ -1098,6 +1090,51 @@ def default_sysconfdir() -> str:
     return 'etc'
 
 
+def determine_worker_count(varnames: T.Optional[T.List[str]] = None) -> int:
+    num_workers = 0
+    varnames = varnames or []
+    # Add MESON_NUM_PROCESSES last, so it will prevail if more than one
+    # variable is present.
+    varnames.append('MESON_NUM_PROCESSES')
+    for varname in varnames:
+        if varname in os.environ:
+            try:
+                num_workers = int(os.environ[varname])
+                if num_workers < 0:
+                    raise ValueError
+            except ValueError:
+                print(f'Invalid value in {varname}, using 1 thread.')
+                num_workers = 1
+
+    if num_workers == 0:
+        try:
+            # Fails in some weird environments such as Debian
+            # reproducible build.
+            num_workers = multiprocessing.cpu_count()
+        except Exception:
+            num_workers = 1
+    return num_workers
+
+def is_parent_path(parent: str, trial: str) -> bool:
+    '''Checks if @trial is a file under the directory @parent. Both @trial and @parent should be
+       adequately normalized, though empty and '.' segments in @parent and @trial are accepted
+       and discarded, matching the behavior of os.path.commonpath.  Either both or none should
+       be absolute.'''
+    assert os.path.isabs(parent) == os.path.isabs(trial)
+    if is_windows():
+        parent = parent.replace('\\', '/')
+        trial = trial.replace('\\', '/')
+
+    split_parent = parent.split('/')
+    split_trial = trial.split('/')
+
+    split_parent = [c for c in split_parent if c and c != '.']
+    split_trial = [c for c in split_trial if c and c != '.']
+
+    components = len(split_parent)
+    return len(split_trial) >= components and split_trial[:components] == split_parent
+
+
 def has_path_sep(name: str, sep: str = '/\\') -> bool:
     'Checks if any of the specified @sep path separators are in @name'
     for each in sep:
@@ -1186,25 +1223,65 @@ def join_args(args: T.Iterable[str]) -> str:
 def do_replacement(regex: T.Pattern[str], line: str,
                    variable_format: Literal['meson', 'cmake', 'cmake@'],
                    confdata: T.Union[T.Dict[str, T.Tuple[str, T.Optional[str]]], 'ConfigurationData']) -> T.Tuple[str, T.Set[str]]:
-    missing_variables: T.Set[str] = set()
-    if variable_format == 'cmake':
-        start_tag = '${'
-        backslash_tag = '\\${'
+    if variable_format == 'meson':
+        return do_replacement_meson(regex, line, confdata)
+    elif variable_format in {'cmake', 'cmake@'}:
+        return do_replacement_cmake(regex, line, variable_format == 'cmake@', confdata)
     else:
-        start_tag = '@'
-        backslash_tag = '\\@'
+        raise MesonException('Invalid variable format')
+
+def do_replacement_meson(regex: T.Pattern[str], line: str,
+                         confdata: T.Union[T.Dict[str, T.Tuple[str, T.Optional[str]]], 'ConfigurationData']) -> T.Tuple[str, T.Set[str]]:
+    missing_variables: T.Set[str] = set()
 
     def variable_replace(match: T.Match[str]) -> str:
-        # Pairs of escape characters before '@' or '\@'
+        # Pairs of escape characters before '@', '\@', '${' or '\${'
         if match.group(0).endswith('\\'):
             num_escapes = match.end(0) - match.start(0)
             return '\\' * (num_escapes // 2)
-        # Single escape character and '@'
-        elif match.group(0) == backslash_tag:
-            return start_tag
-        # Template variable to be replaced
+        # \@escaped\@ variables
+        elif match.groupdict().get('escaped') is not None:
+            return match.group('escaped')[1:-2]+'@'
         else:
-            varname = match.group(1)
+            # Template variable to be replaced
+            varname = match.group('variable')
+            var_str = ''
+            if varname in confdata:
+                var, _ = confdata.get(varname)
+                if isinstance(var, str):
+                    var_str = var
+                elif isinstance(var, int):
+                    var_str = str(var)
+                else:
+                    msg = f'Tried to replace variable {varname!r} value with ' \
+                          f'something other than a string or int: {var!r}'
+                    raise MesonException(msg)
+            else:
+                missing_variables.add(varname)
+            return var_str
+    return re.sub(regex, variable_replace, line), missing_variables
+
+def do_replacement_cmake(regex: T.Pattern[str], line: str, at_only: bool,
+                         confdata: T.Union[T.Dict[str, T.Tuple[str, T.Optional[str]]], 'ConfigurationData']) -> T.Tuple[str, T.Set[str]]:
+    missing_variables: T.Set[str] = set()
+
+    def variable_replace(match: T.Match[str]) -> str:
+        # Pairs of escape characters before '@', '\@', '${' or '\${'
+        if match.group(0).endswith('\\'):
+            num_escapes = match.end(0) - match.start(0)
+            return '\\' * (num_escapes // 2)
+        # Handle cmake escaped \${} tags
+        elif not at_only and match.group(0) == '\\${':
+            return '${'
+        # \@escaped\@ variables
+        elif match.groupdict().get('escaped') is not None:
+            return match.group('escaped')[1:-2]+'@'
+        else:
+            # Template variable to be replaced
+            varname = match.group('variable')
+            if not varname:
+                varname = match.group('cmake_variable')
+
             var_str = ''
             if varname in confdata:
                 var, _ = confdata.get(varname)
@@ -1223,11 +1300,36 @@ def do_replacement(regex: T.Pattern[str], line: str,
             return var_str
     return re.sub(regex, variable_replace, line), missing_variables
 
-def do_define(regex: T.Pattern[str], line: str, confdata: 'ConfigurationData',
-              variable_format: Literal['meson', 'cmake', 'cmake@'], subproject: T.Optional[SubProject] = None) -> str:
-    cmake_bool_define = False
-    if variable_format != "meson":
-        cmake_bool_define = "cmakedefine01" in line
+def do_define_meson(regex: T.Pattern[str], line: str, confdata: 'ConfigurationData',
+                    subproject: T.Optional[SubProject] = None) -> str:
+
+    arr = line.split()
+    if len(arr) != 2:
+        raise MesonException('#mesondefine does not contain exactly two tokens: %s' % line.strip())
+
+    varname = arr[1]
+    try:
+        v, _ = confdata.get(varname)
+    except KeyError:
+        return '/* #undef %s */\n' % varname
+
+    if isinstance(v, str):
+        result = f'#define {varname} {v}'.strip() + '\n'
+        result, _ = do_replacement_meson(regex, result, confdata)
+        return result
+    elif isinstance(v, bool):
+        if v:
+            return '#define %s\n' % varname
+        else:
+            return '#undef %s\n' % varname
+    elif isinstance(v, int):
+        return '#define %s %d\n' % (varname, v)
+    else:
+        raise MesonException('#mesondefine argument "%s" is of unknown type.' % varname)
+
+def do_define_cmake(regex: T.Pattern[str], line: str, confdata: 'ConfigurationData', at_only: bool,
+                    subproject: T.Optional[SubProject] = None) -> str:
+    cmake_bool_define = 'cmakedefine01' in line
 
     def get_cmake_define(line: str, confdata: 'ConfigurationData') -> str:
         arr = line.split()
@@ -1246,12 +1348,10 @@ def do_define(regex: T.Pattern[str], line: str, confdata: 'ConfigurationData',
         return ' '.join(define_value)
 
     arr = line.split()
-    if len(arr) != 2:
-        if variable_format == 'meson':
-            raise MesonException('#mesondefine does not contain exactly two tokens: %s' % line.strip())
-        elif subproject is not None:
-            from ..interpreterbase.decorators import FeatureNew
-            FeatureNew.single_use('cmakedefine without exactly two tokens', '0.54.1', subproject)
+
+    if len(arr) != 2 and subproject is not None:
+        from ..interpreterbase.decorators import FeatureNew
+        FeatureNew.single_use('cmakedefine without exactly two tokens', '0.54.1', subproject)
 
     varname = arr[1]
     try:
@@ -1262,53 +1362,55 @@ def do_define(regex: T.Pattern[str], line: str, confdata: 'ConfigurationData',
         else:
             return '/* #undef %s */\n' % varname
 
-    if isinstance(v, str) or variable_format != "meson":
-        if variable_format == 'meson':
-            result = v
-        else:
-            if not cmake_bool_define and not v:
-                return '/* #undef %s */\n' % varname
+    if not cmake_bool_define and not v:
+        return '/* #undef %s */\n' % varname
 
-            result = get_cmake_define(line, confdata)
-        result = f'#define {varname} {result}'.strip() + '\n'
-        result, _ = do_replacement(regex, result, variable_format, confdata)
-        return result
-    elif isinstance(v, bool):
-        if v:
-            return '#define %s\n' % varname
-        else:
-            return '#undef %s\n' % varname
-    elif isinstance(v, int):
-        return '#define %s %d\n' % (varname, v)
-    else:
-        raise MesonException('#mesondefine argument "%s" is of unknown type.' % varname)
+    result = get_cmake_define(line, confdata)
+    result = f'#define {varname} {result}'.strip() + '\n'
+    result, _ = do_replacement_cmake(regex, result, at_only, confdata)
+    return result
 
 def get_variable_regex(variable_format: Literal['meson', 'cmake', 'cmake@'] = 'meson') -> T.Pattern[str]:
     # Only allow (a-z, A-Z, 0-9, _, -) as valid characters for a define
-    # Also allow escaping '@' with '\@'
     if variable_format in {'meson', 'cmake@'}:
-        regex = re.compile(r'(?:\\\\)+(?=\\?@)|\\@|@([-a-zA-Z0-9_]+)@')
+        # Also allow escaping pairs of '@' with '\@'
+        regex = re.compile(r'''
+            (?:\\\\)+(?=\\?@)  # Matches multiple backslashes followed by an @ symbol
+            |                  # OR
+            (?<!\\)@(?P<variable>[-a-zA-Z0-9_]+)@  # Match a variable enclosed in @ symbols and capture the variable name; no matches beginning with '\@'
+            |                  # OR
+            (?P<escaped>\\@[-a-zA-Z0-9_]+\\@)  # Match an escaped variable enclosed in @ symbols
+        ''', re.VERBOSE)
     else:
-        regex = re.compile(r'(?:\\\\)+(?=\\?\$)|\\\${|\${([-a-zA-Z0-9_]+)}')
+        regex = re.compile(r'''
+            (?:\\\\)+(?=\\?(\$|@))  # Match multiple backslashes followed by a dollar sign or an @ symbol
+            |                  # OR
+            \\\${              # Match a backslash followed by a dollar sign and an opening curly brace
+            |                  # OR
+            \${(?P<cmake_variable>[-a-zA-Z0-9_]+)}  # Match a variable enclosed in curly braces and capture the variable name
+            |                  # OR
+            (?<!\\)@(?P<variable>[-a-zA-Z0-9_]+)@  # Match a variable enclosed in @ symbols and capture the variable name; no matches beginning with '\@'
+            |                  # OR
+            (?P<escaped>\\@[-a-zA-Z0-9_]+\\@)  # Match an escaped variable enclosed in @ symbols
+        ''', re.VERBOSE)
     return regex
 
 def do_conf_str(src: str, data: T.List[str], confdata: 'ConfigurationData',
                 variable_format: Literal['meson', 'cmake', 'cmake@'],
                 subproject: T.Optional[SubProject] = None) -> T.Tuple[T.List[str], T.Set[str], bool]:
-    def line_is_valid(line: str, variable_format: str) -> bool:
-        if variable_format == 'meson':
-            if '#cmakedefine' in line:
-                return False
-        else: # cmake format
-            if '#mesondefine' in line:
-                return False
-        return True
+    if variable_format == 'meson':
+        return do_conf_str_meson(src, data, confdata, subproject)
+    elif variable_format in {'cmake', 'cmake@'}:
+        return do_conf_str_cmake(src, data, confdata, variable_format == 'cmake@', subproject)
+    else:
+        raise MesonException('Invalid variable format')
 
-    regex = get_variable_regex(variable_format)
+def do_conf_str_meson(src: str, data: T.List[str], confdata: 'ConfigurationData',
+                      subproject: T.Optional[SubProject] = None) -> T.Tuple[T.List[str], T.Set[str], bool]:
+
+    regex = get_variable_regex('meson')
 
     search_token = '#mesondefine'
-    if variable_format != 'meson':
-        search_token = '#cmakedefine'
 
     result: T.List[str] = []
     missing_variables: T.Set[str] = set()
@@ -1318,11 +1420,42 @@ def do_conf_str(src: str, data: T.List[str], confdata: 'ConfigurationData',
     for line in data:
         if line.lstrip().startswith(search_token):
             confdata_useless = False
-            line = do_define(regex, line, confdata, variable_format, subproject)
+            line = do_define_meson(regex, line, confdata, subproject)
         else:
-            if not line_is_valid(line, variable_format):
+            if '#cmakedefine' in line:
+                raise MesonException(f'Format error in {src}: saw "{line.strip()}" when format set to "meson"')
+            line, missing = do_replacement_meson(regex, line, confdata)
+            missing_variables.update(missing)
+            if missing:
+                confdata_useless = False
+        result.append(line)
+
+    return result, missing_variables, confdata_useless
+
+def do_conf_str_cmake(src: str, data: T.List[str], confdata: 'ConfigurationData', at_only: bool,
+                      subproject: T.Optional[SubProject] = None) -> T.Tuple[T.List[str], T.Set[str], bool]:
+
+    variable_format: Literal['cmake', 'cmake@'] = 'cmake'
+    if at_only:
+        variable_format = 'cmake@'
+
+    regex = get_variable_regex(variable_format)
+
+    search_token = '#cmakedefine'
+
+    result: T.List[str] = []
+    missing_variables: T.Set[str] = set()
+    # Detect when the configuration data is empty and no tokens were found
+    # during substitution so we can warn the user to use the `copy:` kwarg.
+    confdata_useless = not confdata.keys()
+    for line in data:
+        if line.lstrip().startswith(search_token):
+            confdata_useless = False
+            line = do_define_cmake(regex, line, confdata, at_only, subproject)
+        else:
+            if '#mesondefine' in line:
                 raise MesonException(f'Format error in {src}: saw "{line.strip()}" when format set to "{variable_format}"')
-            line, missing = do_replacement(regex, line, variable_format, confdata)
+            line, missing = do_replacement_cmake(regex, line, at_only, confdata)
             missing_variables.update(missing)
             if missing:
                 confdata_useless = False
@@ -1445,6 +1578,26 @@ def listify(item: T.Any, flatten: bool = True) -> T.List[T.Any]:
             result.append(i)
     return result
 
+def listify_array_value(value: T.Union[str, T.List[str]], shlex_split_args: bool = False) -> T.List[str]:
+    if isinstance(value, str):
+        if value.startswith('['):
+            try:
+                newvalue = ast.literal_eval(value)
+            except ValueError:
+                raise MesonException(f'malformed value {value}')
+        elif value == '':
+            newvalue = []
+        else:
+            if shlex_split_args:
+                newvalue = split_args(value)
+            else:
+                newvalue = [v.strip() for v in value.split(',')]
+    elif isinstance(value, list):
+        newvalue = value
+    else:
+        raise MesonException(f'"{value}" should be a string array, but it is not')
+    assert isinstance(newvalue, list)
+    return newvalue
 
 def extract_as_list(dict_object: T.Dict[_T, _U], key: _T, pop: bool = False) -> T.List[_U]:
     '''
@@ -1509,9 +1662,9 @@ def partition(pred: T.Callable[[_T], object], iterable: T.Iterable[_T]) -> T.Tup
 
 
 def Popen_safe(args: T.List[str], write: T.Optional[str] = None,
-               stdin: T.Union[T.TextIO, T.BinaryIO, int] = subprocess.DEVNULL,
-               stdout: T.Union[T.TextIO, T.BinaryIO, int] = subprocess.PIPE,
-               stderr: T.Union[T.TextIO, T.BinaryIO, int] = subprocess.PIPE,
+               stdin: T.Union[None, T.TextIO, T.BinaryIO, int] = subprocess.DEVNULL,
+               stdout: T.Union[None, T.TextIO, T.BinaryIO, int] = subprocess.PIPE,
+               stderr: T.Union[None, T.TextIO, T.BinaryIO, int] = subprocess.PIPE,
                **kwargs: T.Any) -> T.Tuple['subprocess.Popen[str]', str, str]:
     import locale
     encoding = locale.getpreferredencoding()
@@ -1541,9 +1694,9 @@ def Popen_safe(args: T.List[str], write: T.Optional[str] = None,
 
 
 def Popen_safe_legacy(args: T.List[str], write: T.Optional[str] = None,
-                      stdin: T.Union[T.TextIO, T.BinaryIO, int] = subprocess.DEVNULL,
-                      stdout: T.Union[T.TextIO, T.BinaryIO, int] = subprocess.PIPE,
-                      stderr: T.Union[T.TextIO, T.BinaryIO, int] = subprocess.PIPE,
+                      stdin: T.Union[None, T.TextIO, T.BinaryIO, int] = subprocess.DEVNULL,
+                      stdout: T.Union[None, T.TextIO, T.BinaryIO, int] = subprocess.PIPE,
+                      stderr: T.Union[None, T.TextIO, T.BinaryIO, int] = subprocess.PIPE,
                       **kwargs: T.Any) -> T.Tuple['subprocess.Popen[str]', str, str]:
     p = subprocess.Popen(args, universal_newlines=False, close_fds=False,
                          stdin=stdin, stdout=stdout, stderr=stderr, **kwargs)
@@ -1575,7 +1728,7 @@ def Popen_safe_logged(args: T.List[str], msg: str = 'Called', **kwargs: T.Any) -
         mlog.debug(f'{msg}: `{join_args(args)}` -> {excp}')
         raise
 
-    rc, out, err = p.returncode, o.strip(), e.strip()
+    rc, out, err = p.returncode, o.strip() if o else None, e.strip() if e else None
     mlog.debug('-----------')
     mlog.debug(f'{msg}: `{join_args(args)}` -> {rc}')
     if out:
@@ -1729,6 +1882,8 @@ def get_filenames_templates_dict(inputs: T.List[str], outputs: T.List[str]) -> T
     If there is more than one input file, the following keys are also created:
 
     @INPUT0@, @INPUT1@, ... one for each input file
+    @PLAINNAME0@, @PLAINNAME1@, ... one for each input file
+    @BASENAME0@, @BASENAME1@, ... one for each input file
 
     If there is more than one output file, the following keys are also created:
 
@@ -1742,6 +1897,9 @@ def get_filenames_templates_dict(inputs: T.List[str], outputs: T.List[str]) -> T
         for (ii, vv) in enumerate(inputs):
             # Write out @INPUT0@, @INPUT1@, ...
             values[f'@INPUT{ii}@'] = vv
+            plain = os.path.basename(vv)
+            values[f'@PLAINNAME{ii}@'] = plain
+            values[f'@BASENAME{ii}@'] = os.path.splitext(plain)[0]
         if len(inputs) == 1:
             # Just one value, substitute @PLAINNAME@ and @BASENAME@
             values['@PLAINNAME@'] = plain = os.path.basename(inputs[0])
@@ -1759,18 +1917,18 @@ def get_filenames_templates_dict(inputs: T.List[str], outputs: T.List[str]) -> T
     return values
 
 
-def _make_tree_writable(topdir: str) -> None:
+def _make_tree_writable(topdir: T.Union[str, Path]) -> None:
     # Ensure all files and directories under topdir are writable
     # (and readable) by owner.
     for d, _, files in os.walk(topdir):
         os.chmod(d, os.stat(d).st_mode | stat.S_IWRITE | stat.S_IREAD)
         for fname in files:
             fpath = os.path.join(d, fname)
-            if os.path.isfile(fpath):
+            if not os.path.islink(fpath) and os.path.isfile(fpath):
                 os.chmod(fpath, os.stat(fpath).st_mode | stat.S_IWRITE | stat.S_IREAD)
 
 
-def windows_proof_rmtree(f: str) -> None:
+def windows_proof_rmtree(f:  T.Union[str, Path]) -> None:
     # On Windows if anyone is holding a file open you can't
     # delete it. As an example an anti virus scanner might
     # be scanning files you are trying to delete. The only
@@ -1797,7 +1955,7 @@ def windows_proof_rmtree(f: str) -> None:
     shutil.rmtree(f)
 
 
-def windows_proof_rm(fpath: str) -> None:
+def windows_proof_rm(fpath: T.Union[str, Path]) -> None:
     """Like windows_proof_rmtree, but for a single file."""
     if os.path.isfile(fpath):
         os.chmod(fpath, os.stat(fpath).st_mode | stat.S_IWRITE | stat.S_IREAD)
@@ -1918,14 +2076,14 @@ class OrderedSet(T.MutableSet[_T]):
         for item in iterable:
             self.discard(item)
 
-def relpath(path: str, start: str) -> str:
+def relpath(path: T.Union[str, Path], start: T.Union[str, Path]) -> str:
     # On Windows a relative path can't be evaluated for paths on two different
     # drives (i.e. c:\foo and f:\bar).  The only thing left to do is to use the
     # original absolute path.
     try:
         return os.path.relpath(path, start)
     except (TypeError, ValueError):
-        return path
+        return str(path)
 
 def path_is_in_root(path: Path, root: Path, resolve: bool = False) -> bool:
     # Check whether a path is within the root directory root
@@ -1959,7 +2117,58 @@ class LibType(enum.IntEnum):
 
 class ProgressBarFallback:  # lgtm [py/iter-returns-non-self]
     '''
-    Fallback progress bar implementation when tqdm is not found
+    Fallback progress bar implementation when tqdm is not foundclass OptionType(enum.IntEnum):
+
+    """Enum used to specify what kind of argument a thing is."""
+
+    BUILTIN = 0
+    BACKEND = 1
+    BASE = 2
+    COMPILER = 3
+    PROJECT = 4
+
+# This is copied from coredata. There is no way to share this, because this
+# is used in the OptionKey constructor, and the coredata lists are
+# OptionKeys...
+_BUILTIN_NAMES = {
+    'prefix',
+    'bindir',
+    'datadir',
+    'includedir',
+    'infodir',
+    'libdir',
+    'licensedir',
+    'libexecdir',
+    'localedir',
+    'localstatedir',
+    'mandir',
+    'sbindir',
+    'sharedstatedir',
+    'sysconfdir',
+    'auto_features',
+    'backend',
+    'buildtype',
+    'debug',
+    'default_library',
+    'errorlogs',
+    'genvslite',
+    'install_umask',
+    'layout',
+    'optimization',
+    'prefer_static',
+    'stdsplit',
+    'strip',
+    'unity',
+    'unity_size',
+    'warning_level',
+    'werror',
+    'wrap_mode',
+    'force_fallback_for',
+    'pkg_config_path',
+    'cmake_prefix_path',
+    'vsenv',
+}
+
 
     Since this class is not an actual iterator, but only provides a minimal
     fallback, it is safe to ignore the 'Iterator does not return self from
@@ -2135,257 +2344,6 @@ def generate_list(func: T.Callable[..., T.Generator[_T, None, None]]) -> T.Calla
     return wrapper
 
 
-class OptionType(enum.IntEnum):
-
-    """Enum used to specify what kind of argument a thing is."""
-
-    BUILTIN = 0
-    BACKEND = 1
-    BASE = 2
-    COMPILER = 3
-    PROJECT = 4
-
-# This is copied from coredata. There is no way to share this, because this
-# is used in the OptionKey constructor, and the coredata lists are
-# OptionKeys...
-_BUILTIN_NAMES = {
-    'prefix',
-    'bindir',
-    'datadir',
-    'includedir',
-    'infodir',
-    'libdir',
-    'licensedir',
-    'libexecdir',
-    'localedir',
-    'localstatedir',
-    'mandir',
-    'sbindir',
-    'sharedstatedir',
-    'sysconfdir',
-    'auto_features',
-    'backend',
-    'buildtype',
-    'debug',
-    'default_library',
-    'errorlogs',
-    'genvslite',
-    'install_umask',
-    'layout',
-    'optimization',
-    'prefer_static',
-    'stdsplit',
-    'strip',
-    'unity',
-    'unity_size',
-    'warning_level',
-    'werror',
-    'wrap_mode',
-    'force_fallback_for',
-    'pkg_config_path',
-    'cmake_prefix_path',
-    'vsenv',
-}
-
-
-def _classify_argument(key: 'OptionKey') -> OptionType:
-    """Classify arguments into groups so we know which dict to assign them to."""
-
-    if key.name.startswith('b_'):
-        return OptionType.BASE
-    elif key.lang is not None:
-        return OptionType.COMPILER
-    elif key.name in _BUILTIN_NAMES or key.module:
-        return OptionType.BUILTIN
-    elif key.name.startswith('backend_'):
-        assert key.machine is MachineChoice.HOST, str(key)
-        return OptionType.BACKEND
-    else:
-        assert key.machine is MachineChoice.HOST, str(key)
-        return OptionType.PROJECT
-
-
-@total_ordering
-class OptionKey:
-
-    """Represents an option key in the various option dictionaries.
-
-    This provides a flexible, powerful way to map option names from their
-    external form (things like subproject:build.option) to something that
-    internally easier to reason about and produce.
-    """
-
-    __slots__ = ['name', 'subproject', 'machine', 'lang', '_hash', 'type', 'module']
-
-    name: str
-    subproject: str
-    machine: MachineChoice
-    lang: T.Optional[str]
-    _hash: int
-    type: OptionType
-    module: T.Optional[str]
-
-    def __init__(self, name: str, subproject: str = '',
-                 machine: MachineChoice = MachineChoice.HOST,
-                 lang: T.Optional[str] = None,
-                 module: T.Optional[str] = None,
-                 _type: T.Optional[OptionType] = None):
-        # the _type option to the constructor is kinda private. We want to be
-        # able tos ave the state and avoid the lookup function when
-        # pickling/unpickling, but we need to be able to calculate it when
-        # constructing a new OptionKey
-        object.__setattr__(self, 'name', name)
-        object.__setattr__(self, 'subproject', subproject)
-        object.__setattr__(self, 'machine', machine)
-        object.__setattr__(self, 'lang', lang)
-        object.__setattr__(self, 'module', module)
-        object.__setattr__(self, '_hash', hash((name, subproject, machine, lang, module)))
-        if _type is None:
-            _type = _classify_argument(self)
-        object.__setattr__(self, 'type', _type)
-
-    def __setattr__(self, key: str, value: T.Any) -> None:
-        raise AttributeError('OptionKey instances do not support mutation.')
-
-    def __getstate__(self) -> T.Dict[str, T.Any]:
-        return {
-            'name': self.name,
-            'subproject': self.subproject,
-            'machine': self.machine,
-            'lang': self.lang,
-            '_type': self.type,
-            'module': self.module,
-        }
-
-    def __setstate__(self, state: T.Dict[str, T.Any]) -> None:
-        """De-serialize the state of a pickle.
-
-        This is very clever. __init__ is not a constructor, it's an
-        initializer, therefore it's safe to call more than once. We create a
-        state in the custom __getstate__ method, which is valid to pass
-        splatted to the initializer.
-        """
-        # Mypy doesn't like this, because it's so clever.
-        self.__init__(**state)  # type: ignore
-
-    def __hash__(self) -> int:
-        return self._hash
-
-    def _to_tuple(self) -> T.Tuple[str, OptionType, str, str, MachineChoice, str]:
-        return (self.subproject, self.type, self.lang or '', self.module or '', self.machine, self.name)
-
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, OptionKey):
-            return self._to_tuple() == other._to_tuple()
-        return NotImplemented
-
-    def __lt__(self, other: object) -> bool:
-        if isinstance(other, OptionKey):
-            return self._to_tuple() < other._to_tuple()
-        return NotImplemented
-
-    def __str__(self) -> str:
-        out = self.name
-        if self.lang:
-            out = f'{self.lang}_{out}'
-        if self.machine is MachineChoice.BUILD:
-            out = f'build.{out}'
-        if self.module:
-            out = f'{self.module}.{out}'
-        if self.subproject:
-            out = f'{self.subproject}:{out}'
-        return out
-
-    def __repr__(self) -> str:
-        return f'OptionKey({self.name!r}, {self.subproject!r}, {self.machine!r}, {self.lang!r}, {self.module!r}, {self.type!r})'
-
-    @classmethod
-    def from_string(cls, raw: str) -> 'OptionKey':
-        """Parse the raw command line format into a three part tuple.
-
-        This takes strings like `mysubproject:build.myoption` and Creates an
-        OptionKey out of them.
-        """
-        try:
-            subproject, raw2 = raw.split(':')
-        except ValueError:
-            subproject, raw2 = '', raw
-
-        module = None
-        for_machine = MachineChoice.HOST
-        try:
-            prefix, raw3 = raw2.split('.')
-            if prefix == 'build':
-                for_machine = MachineChoice.BUILD
-            else:
-                module = prefix
-        except ValueError:
-            raw3 = raw2
-
-        from ..compilers import all_languages
-        if any(raw3.startswith(f'{l}_') for l in all_languages):
-            lang, opt = raw3.split('_', 1)
-        else:
-            lang, opt = None, raw3
-        assert ':' not in opt
-        assert '.' not in opt
-
-        return cls(opt, subproject, for_machine, lang, module)
-
-    def evolve(self, name: T.Optional[str] = None, subproject: T.Optional[str] = None,
-               machine: T.Optional[MachineChoice] = None, lang: T.Optional[str] = '',
-               module: T.Optional[str] = '') -> 'OptionKey':
-        """Create a new copy of this key, but with altered members.
-
-        For example:
-        >>> a = OptionKey('foo', '', MachineChoice.Host)
-        >>> b = OptionKey('foo', 'bar', MachineChoice.Host)
-        >>> b == a.evolve(subproject='bar')
-        True
-        """
-        # We have to be a little clever with lang here, because lang is valid
-        # as None, for non-compiler options
-        return OptionKey(
-            name if name is not None else self.name,
-            subproject if subproject is not None else self.subproject,
-            machine if machine is not None else self.machine,
-            lang if lang != '' else self.lang,
-            module if module != '' else self.module
-        )
-
-    def as_root(self) -> 'OptionKey':
-        """Convenience method for key.evolve(subproject='')."""
-        return self.evolve(subproject='')
-
-    def as_build(self) -> 'OptionKey':
-        """Convenience method for key.evolve(machine=MachineChoice.BUILD)."""
-        return self.evolve(machine=MachineChoice.BUILD)
-
-    def as_host(self) -> 'OptionKey':
-        """Convenience method for key.evolve(machine=MachineChoice.HOST)."""
-        return self.evolve(machine=MachineChoice.HOST)
-
-    def is_backend(self) -> bool:
-        """Convenience method to check if this is a backend option."""
-        return self.type is OptionType.BACKEND
-
-    def is_builtin(self) -> bool:
-        """Convenience method to check if this is a builtin option."""
-        return self.type is OptionType.BUILTIN
-
-    def is_compiler(self) -> bool:
-        """Convenience method to check if this is a builtin option."""
-        return self.type is OptionType.COMPILER
-
-    def is_project(self) -> bool:
-        """Convenience method to check if this is a project option."""
-        return self.type is OptionType.PROJECT
-
-    def is_base(self) -> bool:
-        """Convenience method to check if this is a base option."""
-        return self.type is OptionType.BASE
-
-
 def pickle_load(filename: str, object_name: str, object_type: T.Type[_PL], suggest_reconfigure: bool = True) -> _PL:
     load_fail_msg = f'{object_name} file {filename!r} is corrupted.'
     extra_msg = ' Consider reconfiguring the directory with "meson setup --reconfigure".' if suggest_reconfigure else ''
@@ -2431,3 +2389,50 @@ def first(iter: T.Iterable[_T], predicate: T.Callable[[_T], bool]) -> T.Optional
         if predicate(i):
             return i
     return None
+
+
+def get_rsp_threshold() -> int:
+    '''Return a conservative estimate of the commandline size in bytes
+    above which a response file should be used.  May be overridden for
+    debugging by setting environment variable MESON_RSP_THRESHOLD.'''
+
+    if is_windows():
+        # Usually 32k, but some projects might use cmd.exe,
+        # and that has a limit of 8k.
+        limit = 8192
+    else:
+        # Unix-like OSes usually have very large command line limits, (On Linux,
+        # for example, this is limited by the kernel's MAX_ARG_STRLEN). However,
+        # some programs place much lower limits, notably Wine which enforces a
+        # 32k limit like Windows. Therefore, we limit the command line to 32k.
+        limit = 32768
+
+    # Be conservative
+    limit = limit // 2
+    return int(os.environ.get('MESON_RSP_THRESHOLD', limit))
+
+
+class lazy_property(T.Generic[_T]):
+    """Descriptor that replaces the function it wraps with the value generated.
+
+    This property will only be calculated the first time it's queried, and will
+    be cached and the cached value used for subsequent calls.
+
+    This works by shadowing itself with the calculated value, in the instance.
+    Due to Python's MRO that means that the calculated value will be found
+    before this property, speeding up subsequent lookups.
+    """
+    def __init__(self, func: T.Callable[[T.Any], _T]) -> None:
+        self.__name: T.Optional[str] = None
+        self.__func = func
+
+    def __set_name__(self, owner: T.Any, name: str) -> None:
+        if self.__name is None:
+            self.__name = name
+        else:
+            assert name == self.__name
+
+    def __get__(self, instance: object, cls: T.Type) -> _T:
+        value = self.__func(instance)
+        setattr(instance, self.__name, value)
+        return value

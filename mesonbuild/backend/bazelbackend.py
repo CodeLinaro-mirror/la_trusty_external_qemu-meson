@@ -27,7 +27,7 @@ from pathlib import Path
 
 from .. import build, dependencies, mlog
 from ..dependencies.pkgconfig import PkgConfigDependency
-from ..mesonlib import File, OptionKey, ProgressBar
+from ..mesonlib import File, ProgressBar
 from .backends import Backend
 from .bazel.bazel_rules import BazelRuleLibrary, meson_target_as_bazel_label
 from .bazel.build_target_generator import BuildTargetGenerator
@@ -60,7 +60,7 @@ class BazelBackend(Backend):
 
     def load_shims(self):
         shim_f = Path(
-            self.environment.coredata.options[OptionKey("backend_shim")].value
+            self.environment.coredata.optstore.get_value("backend_shim")
         )
         if shim_f.exists() and shim_f.is_file():
             with open(shim_f, "r") as shim_file:
@@ -150,9 +150,7 @@ class BazelBackend(Backend):
             self.build_target_generator.generate(target)
 
     def initialize(self):
-        shadow_dir = self.environment.coredata.options[
-            OptionKey("backend_shadow_build")
-        ].value
+        shadow_dir = self.environment.coredata.optstore.get_value("backend_shadow_build")
         self.shims = self.load_shims()
         self.build_prefix = (
             Path("platform")

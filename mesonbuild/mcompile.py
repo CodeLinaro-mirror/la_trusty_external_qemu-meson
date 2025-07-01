@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2020 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 """Entrypoint script for backend agnostic compile."""
@@ -26,16 +16,16 @@ from pathlib import Path
 
 from . import mlog
 from . import mesonlib
-from .mesonlib import MesonException, RealPathAction, join_args, setup_vsenv
+from .options import OptionKey
+from .mesonlib import MesonException, RealPathAction, join_args, listify_array_value, setup_vsenv
 from mesonbuild.environment import detect_ninja
-from mesonbuild.coredata import UserArrayOption
 from mesonbuild import build
 
 if T.TYPE_CHECKING:
     import argparse
 
 def array_arg(value: str) -> T.List[str]:
-    return UserArrayOption.listify_value(value)
+    return listify_array_value(value)
 
 def validate_builddir(builddir: Path) -> None:
     if not (builddir / 'meson-private' / 'coredata.dat').is_file():
@@ -365,14 +355,14 @@ def run(options: 'argparse.Namespace') -> int:
 
     b = build.load(options.wd)
     cdata = b.environment.coredata
-    need_vsenv = T.cast('bool', cdata.get_option(mesonlib.OptionKey('vsenv')))
+    need_vsenv = T.cast('bool', cdata.optstore.get_value_for(OptionKey('vsenv')))
     if setup_vsenv(need_vsenv):
         mlog.log(mlog.green('INFO:'), 'automatically activated MSVC compiler environment')
 
     cmd: T.List[str] = []
     env: T.Optional[T.Dict[str, str]] = None
 
-    backend = cdata.get_option(mesonlib.OptionKey('backend'))
+    backend = cdata.optstore.get_value_for(OptionKey('backend'))
     assert isinstance(backend, str)
     mlog.log(mlog.green('INFO:'), 'autodetecting backend as', backend)
     if backend == 'ninja':

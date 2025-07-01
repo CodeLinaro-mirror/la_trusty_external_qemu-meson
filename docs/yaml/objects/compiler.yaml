@@ -121,6 +121,16 @@ methods:
 - name: _compiles
   returns: void
   description: You have found a bug if you can see this!
+  kwargs:
+    required:
+      type: bool | feature
+      default: false
+      since: 1.5.0
+      description:
+        When set to `true`, Meson will halt if the check fails.
+
+        When set to a [`feature`](Build-options.md#features) option, the feature
+        will control if it is searched and whether to fail if not found.
   kwargs_inherit:
     - compiler._args
     - compiler._include_directories
@@ -602,7 +612,7 @@ methods:
   # kwargs:
   #   checked:
   #     type: str
-  #     sinec: 0.59.0
+  #     since: 0.59.0
   #     default: "'off'"
   #     description: |
   #       Supported values:
@@ -663,7 +673,17 @@ methods:
     will receive the same arguments (include directories, defines, etc) as with
     normal compilation. That includes for example args added with
     `add_project_arguments()`, or on the command line with `-Dc_args=-DFOO`.
-  varargs_inherit: _build_target_base
+  varargs:
+    name: source
+    type: str | file | custom_tgt | custom_idx | generated_list
+    description: |
+      Input source to preprocess. The following types are supported:
+
+      - Strings relative to the current source directory
+      - [[@file]] objects defined in any preceding build file
+      - The return value of configure-time generators such as [[configure_file]]
+      - The return value of build-time generators such as
+        [[custom_target]] or [[generator.process]]
   kwargs_inherit:
     - compiler._include_directories
   kwargs:
@@ -681,3 +701,10 @@ methods:
       type: dep | list[dep]
       description: Additionally dependencies required.
       since: 1.1.0
+    depends:
+      type: list[build_tgt | custom_tgt]
+      description: |
+        Specifies that this target depends on the specified
+        target(s). These targets should be built before starting
+        to preprocess an input.
+      since: 1.4.0

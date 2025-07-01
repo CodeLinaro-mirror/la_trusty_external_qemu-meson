@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2021 The Meson Developers
-# Copyright © 2021 Intel Corporation
+# Copyright © 2021-2025 Intel Corporation
+# Copyright © 2021-2025 Intel Corporation
 from __future__ import annotations
 
 """Keyword Argument type annotations."""
@@ -10,13 +10,17 @@ import typing as T
 from typing_extensions import TypedDict, Literal, Protocol, NotRequired
 
 from .. import build
-from .. import coredata
+from .. import options
 from ..compilers import Compiler
 from ..dependencies.base import Dependency
-from ..mesonlib import EnvironmentVariables, MachineChoice, File, FileMode, FileOrString, OptionKey
+from ..mesonlib import EnvironmentVariables, MachineChoice, File, FileMode, FileOrString
+from ..options import OptionKey
 from ..modules.cmake import CMakeSubprojectOptions
 from ..programs import ExternalProgram
 from .type_checking import PkgConfigDefineType, SourcesVarargsType
+
+if T.TYPE_CHECKING:
+    TestArgs = T.Union[str, File, build.Target, ExternalProgram]
 
 class FuncAddProjectArgs(TypedDict):
 
@@ -37,7 +41,6 @@ class BaseTest(TypedDict):
 
     """Shared base for the Rust module."""
 
-    args: T.List[T.Union[str, File, build.Target]]
     should_fail: bool
     timeout: int
     workdir: T.Optional[str]
@@ -51,6 +54,7 @@ class FuncBenchmark(BaseTest):
 
     """Keyword Arguments shared between `test` and `benchmark`."""
 
+    args: T.List[TestArgs]
     protocol: Literal['exitcode', 'tap', 'gtest', 'rust']
 
 
@@ -70,10 +74,10 @@ class ExtractRequired(TypedDict):
     """Keyword Arguments consumed by the `extract_required_kwargs` function.
 
     Any function that uses the `required` keyword argument which accepts either
-    a boolean or a feature option should inherit it's arguments from this class.
+    a boolean or a feature option should inherit its arguments from this class.
     """
 
-    required: T.Union[bool, coredata.UserFeatureOption]
+    required: T.Union[bool, options.UserFeatureOption]
 
 
 class ExtractSearchDirs(TypedDict):
@@ -208,8 +212,9 @@ class Project(TypedDict):
 
     version: T.Optional[FileOrString]
     meson_version: T.Optional[str]
-    default_options: T.Dict[OptionKey, T.Union[str, int, bool, T.List[str]]]
+    default_options: T.List[str]
     license: T.List[str]
+    license_files: T.List[str]
     subproject_dir: str
 
 
@@ -237,7 +242,7 @@ class Summary(TypedDict):
 
 class FindProgram(ExtractRequired, ExtractSearchDirs):
 
-    default_options: T.Dict[OptionKey, T.Union[str, int, bool, T.List[str]]]
+    default_options: T.Dict[OptionKey, options.ElementaryOptionValues]
     native: MachineChoice
     version: T.List[str]
 
@@ -266,6 +271,7 @@ class DependencyGetVariable(TypedDict):
     pkgconfig: T.Optional[str]
     configtool: T.Optional[str]
     internal: T.Optional[str]
+    system: T.Optional[str]
     default_value: T.Optional[str]
     pkgconfig_define: PkgConfigDefineType
 
@@ -283,6 +289,10 @@ class VcsTag(TypedDict):
                           build.ExtractedObjects, build.GeneratedList, ExternalProgram, File]]
     output: T.List[str]
     replace_string: str
+    install: bool
+    install_tag: T.Optional[str]
+    install_dir: T.Optional[str]
+    install_mode: FileMode
 
 
 class ConfigureFile(TypedDict):
@@ -305,13 +315,13 @@ class ConfigureFile(TypedDict):
 
 class Subproject(ExtractRequired):
 
-    default_options: T.Dict[OptionKey, T.Union[str, int, bool, T.List[str]]]
+    default_options: T.Dict[OptionKey, options.ElementaryOptionValues]
     version: T.List[str]
 
 
 class DoSubproject(ExtractRequired):
 
-    default_options: T.Dict[OptionKey, T.Union[str, int, bool, T.List[str]]]
+    default_options: T.List[str]
     version: T.List[str]
     cmake_options: T.List[str]
     options: T.Optional[CMakeSubprojectOptions]
@@ -339,7 +349,7 @@ class _BaseBuildTarget(TypedDict):
     name_suffix: T.Optional[str]
     native: MachineChoice
     objects: T.List[build.ObjectTypes]
-    override_options: T.Dict[OptionKey, T.Union[str, int, bool, T.List[str]]]
+    override_options: T.Dict[OptionKey, options.ElementaryOptionValues]
     depend_files: NotRequired[T.List[File]]
     resources: T.List[str]
 
@@ -383,6 +393,7 @@ class Executable(_BuildTarget):
     pie: T.Optional[bool]
     vs_module_defs: T.Optional[T.Union[str, File, build.CustomTarget, build.CustomTargetIndex]]
     win_subsystem: T.Optional[str]
+    android_exe_type: T.Optional[Literal['application', 'executable']]
 
 
 class _StaticLibMixin(TypedDict):

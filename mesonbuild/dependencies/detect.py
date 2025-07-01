@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2013-2021 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 import collections, functools, importlib
@@ -69,10 +59,10 @@ def get_dep_identifier(name: str, kwargs: T.Dict[str, T.Any]) -> 'TV_DepID':
         # All keyword arguments are strings, ints, or lists (or lists of lists)
         if isinstance(value, list):
             for i in value:
-                assert isinstance(i, str)
+                assert isinstance(i, str), i
             value = tuple(frozenset(listify(value)))
         else:
-            assert isinstance(value, (str, bool, int))
+            assert isinstance(value, (str, bool, int)), value
         identifier = (*identifier, (key, value),)
     return identifier
 

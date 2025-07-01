@@ -1,18 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2013-2017 The Meson development team
-# Copyright © 2021 Intel Corporation
-# SPDX-license-identifier: Apache-2.0
+# Copyright © 2021-2023 Intel Corporation
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 """Dependency finders for the Qt framework."""
@@ -131,6 +120,7 @@ class _QtBase:
     clib_compiler: T.Union['MissingCompiler', 'Compiler']
     env: 'Environment'
     libexecdir: T.Optional[str] = None
+    version: str
 
     def __init__(self, name: str, kwargs: T.Dict[str, T.Any]):
         self.name = name
@@ -256,6 +246,7 @@ class QmakeQtDependency(_QtBase, ConfigToolDependency, metaclass=abc.ABCMeta):
 
     """Find Qt using Qmake as a config-tool."""
 
+    version: str
     version_arg = '-v'
 
     def __init__(self, name: str, env: 'Environment', kwargs: T.Dict[str, T.Any]):
@@ -305,9 +296,9 @@ class QmakeQtDependency(_QtBase, ConfigToolDependency, metaclass=abc.ABCMeta):
 
         # Use the buildtype by default, but look at the b_vscrt option if the
         # compiler supports it.
-        is_debug = self.env.coredata.get_option(mesonlib.OptionKey('buildtype')) == 'debug'
-        if mesonlib.OptionKey('b_vscrt') in self.env.coredata.options:
-            if self.env.coredata.options[mesonlib.OptionKey('b_vscrt')].value in {'mdd', 'mtd'}:
+        is_debug = self.env.coredata.optstore.get_value_for('buildtype') == 'debug'
+        if 'b_vscrt' in self.env.coredata.optstore:
+            if self.env.coredata.optstore.get_value_for('b_vscrt') in {'mdd', 'mtd'}:
                 is_debug = True
         modules_lib_suffix = _get_modules_lib_suffix(self.version, self.env.machines[self.for_machine], is_debug)
 

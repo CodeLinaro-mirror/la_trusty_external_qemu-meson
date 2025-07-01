@@ -1,20 +1,9 @@
 #!/usr/bin/env python3
-
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2016 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
 
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-import sys
+import os, sys
 
 if sys.version_info < (3, 7):
     raise SystemExit('ERROR: Tried to install Meson with an unsupported Python version: \n{}'
@@ -22,10 +11,24 @@ if sys.version_info < (3, 7):
 
 from setuptools import setup
 
+scm_args = {}
+HERE = os.path.dirname(__file__)
+if os.path.exists(os.path.join(HERE, '.git')):
+    try:
+        import setuptools_scm
+    except ModuleNotFoundError:
+        pass
+    else:
+        sys.path.insert(0, HERE)
+        from mesonbuild import coredata
+
+        scheme = 'guess-next-dev' if 'rc' in coredata.version else 'release-branch-semver'
+        scm_args = {'use_scm_version': {'version_scheme': scheme}}
+
 data_files = []
 if sys.platform != 'win32':
     # Only useful on UNIX-like systems
     data_files = [('share/man/man1', ['man/meson.1']),
                   ('share/polkit-1/actions', ['data/com.mesonbuild.install.policy'])]
 
-setup(data_files=data_files,)
+setup(data_files=data_files,**scm_args)

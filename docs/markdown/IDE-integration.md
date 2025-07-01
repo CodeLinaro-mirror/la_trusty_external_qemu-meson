@@ -10,7 +10,7 @@ this problem, Meson provides an API that makes it easy for any IDE or
 build tools to integrate Meson builds and provide an experience
 comparable to a solution native to the IDE.
 
-All the resources required for such a IDE integration can be found in
+All the resources required for such an IDE integration can be found in
 the `meson-info` directory in the build directory.
 
 The first thing to do when setting up a Meson project in an IDE is to
@@ -93,12 +93,20 @@ can provide code completion for all source files.
 ```json
 {
     "language": "language ID",
+    "machine": "build" / "host",
     "compiler": ["The", "compiler", "command"],
     "parameters": ["list", "of", "compiler", "parameters"],
     "sources": ["list", "of", "all", "source", "files", "for", "this", "language"],
     "generated_sources": ["list", "of", "all", "source", "files", "that", "where", "generated", "somewhere", "else"]
 }
 ```
+
+*(New in 1.7.0)* The `machine` and `language` keys make it possible to
+to access further information about the compiler in the `compilers`
+introspection information.  `machine` can be absent if `language` is
+`unknown`.  In this case, information about the compiler is not
+available; Meson is therefore unable to know if the output relates
+to either the build of the host machine.
 
 It should be noted that the compiler parameters stored in the
 `parameters` differ from the actual parameters used to compile the
@@ -418,11 +426,12 @@ schema is defined by the class structure given in
 
 # Existing integrations
 
+- [CLion](https://www.jetbrains.com/clion/)
+- [Eclipse CDT](https://www.eclipse.org/cdt/)
 - [Gnome Builder](https://wiki.gnome.org/Apps/Builder)
 - [KDevelop](https://www.kdevelop.org)
-- [Eclipse CDT](https://www.eclipse.org/cdt/)
-- [Meson Syntax Highlighter](https://plugins.jetbrains.com/plugin/13269-meson-syntax-highlighter) plugin for JetBrains IDEs.
-- [vscode-meson](https://github.com/mesonbuild/vscode-meson) extension for VS Code/Codium
-- [Qt Creator](https://doc.qt.io/qtcreator/creator-project-meson.html)
+- [Meson Syntax Highlighter](https://plugins.jetbrains.com/plugin/13269-meson-syntax-highlighter) 3rd party plugin for JetBrains IDEs.
 - [Meson-UI](https://github.com/dreamer-coding-555/meson-ui) (build GUI for Meson)
 - [mmeson](https://github.com/stephanlachnit/mmeson) (ccmake clone for Meson)
+- [Qt Creator](https://doc.qt.io/qtcreator/creator-project-meson.html) 
+- [vscode-meson](https://github.com/mesonbuild/vscode-meson) extension for VS Code/Codium

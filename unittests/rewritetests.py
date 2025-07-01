@@ -1,16 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2016-2021 The Meson development team
-
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import subprocess
 from itertools import zip_longest
@@ -39,18 +28,18 @@ class RewriterTests(BasePlatformTests):
         if isinstance(args, str):
             args = [args]
         command = self.rewrite_command + ['--verbose', '--skip', '--sourcedir', directory] + args
-        p = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        p = subprocess.run(command, capture_output=True, encoding='utf-8', text=True, timeout=60)
         print('STDOUT:')
         print(p.stdout)
         print('STDERR:')
         print(p.stderr)
         if p.returncode != 0:
-            if 'MESON_SKIP_TEST' in p.stdout:
+            if 'MESON_SKIP_TEST' in p.stderr:
                 raise unittest.SkipTest('Project requested skipping.')
-            raise subprocess.CalledProcessError(p.returncode, command, output=p.stdout)
-        if not p.stderr:
+            raise subprocess.CalledProcessError(p.returncode, command, output=p.stderr)
+        if not p.stdout:
             return {}
-        return json.loads(p.stderr)
+        return json.loads(p.stdout)
 
     def rewrite(self, directory, args):
         if isinstance(args, str):
@@ -418,3 +407,17 @@ class RewriterTests(BasePlatformTests):
         # Do it line per line because it is easier to debug like that
         for orig_line, new_line in zip_longest(original_contents.splitlines(), new_contents.splitlines()):
             self.assertEqual(orig_line, new_line)
+
+    def test_rewrite_prefix(self) -> None:
+        self.prime('7 prefix')
+        out = self.rewrite_raw(self.builddir, ['kwargs', 'info', 'project', '/'])
+        expected = {
+            'kwargs': {
+                'project#/': {
+                    "default_options": [
+                        'prefix=/export/doocs'
+                    ]
+                }
+            }
+        }
+        self.assertDictEqual(out, expected)

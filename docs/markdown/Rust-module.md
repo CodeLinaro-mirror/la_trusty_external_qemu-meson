@@ -3,7 +3,7 @@ short-description: Rust language integration module
 authors:
     - name: Dylan Baker
       email: dylan@pnwbakers.com
-      years: [2020, 2021, 2022]
+      years: [2020, 2021, 2022, 2024]
 ...
 
 # Rust module
@@ -36,10 +36,39 @@ It also takes the following keyword arguments:
 
 - `dependencies`: a list of test-only Dependencies
 - `link_with`: a list of additional build Targets to link with (*since 1.2.0*)
+- `link_whole`: a list of additional build Targets to link with in their entirety (*since 1.8.0*)
 - `rust_args`: a list of extra arguments passed to the Rust compiler (*since 1.2.0*)
 
 This function  also accepts all of the keyword arguments accepted by the
 [[test]] function except `protocol`, it will set that automatically.
+
+### doctest()
+
+```meson
+rustmod.doctest(name, target, ...)
+```
+
+*Since 1.8.0*
+
+This function creates a new `test()` target from an existing rust
+based library target. The test will use `rustdoc` to extract and run
+the doctests that are included in `target`'s sources.
+
+This function takes two positional arguments, the first is the name of the
+test and the second is the library or executable that is the rust based target.
+It also takes the following keyword arguments:
+
+- `dependencies`: a list of test-only Dependencies
+- `link_with`: a list of additional build Targets to link with
+- `link_whole`: a list of additional build Targets to link with in their entirety
+- `rust_args`: a list of extra arguments passed to the Rust compiler
+
+The target is linked automatically into the doctests.
+
+This function  also accepts all of the keyword arguments accepted by the
+[[test]] function except `protocol`, it will set that automatically.
+However, arguments are limited to strings that do not contain spaces
+due to limitations of `rustdoc`.
 
 ### bindgen()
 
@@ -57,11 +86,16 @@ It takes the following keyword arguments
 - `input`: a list of Files, Strings, or CustomTargets. The first element is
   the header bindgen will parse, additional elements are dependencies.
 - `output`: the name of the output rust file
+- `output_inline_wrapper`: the name of the optional output c file containing
+  wrappers for static inline function. This requires `bindgen-0.65` or
+  newer (*since 1.3.0*).
 - `include_directories`: A list of `include_directories` or `string` objects,
   these are passed to clang as `-I` arguments *(string since 1.0.0)*
 - `c_args`: a list of string arguments to pass to clang untouched
 - `args`: a list of string arguments to pass to `bindgen` untouched.
 - `dependencies`: a list of `Dependency` objects to pass to the underlying clang call (*since 1.0.0*)
+- `language`: A literal string value of `c` or `cpp`. When set this will force bindgen to treat a source as the given language. Defaults to checking based on the input file extension. *(since 1.4.0)*
+- `bindgen_version`: a list of string version values. When set the found bindgen binary must conform to these constraints. *(since 1.4.0)*
 
 ```meson
 rust = import('unstable-rust')
@@ -103,7 +137,7 @@ were never turned on by Meson.
 
 ```ini
 [properties]
-bindgen_clang_arguments = ['--target', 'x86_64-linux-gnu']
+bindgen_clang_arguments = ['-target', 'x86_64-linux-gnu']
 ```
 
 ### proc_macro()

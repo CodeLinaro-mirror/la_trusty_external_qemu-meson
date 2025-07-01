@@ -114,7 +114,7 @@ meson compile foo:shared_library foo:static_library bar
 Produce a coverage html report (if available):
 
 ```
-meson compile coverage-html
+ninja coverage-html
 ```
 
 ### dist
@@ -224,6 +224,34 @@ DESTDIR=/path/to/staging/area meson install -C builddir
 
 Since *0.60.0* `DESTDIR` and `--destdir` can be a path relative to build
 directory. An absolute path will be set into environment when executing scripts.
+
+### reprotest
+
+*(since 1.6.0)*
+
+{{ reprotest_usage.inc }}
+
+Simple reproducible build tester that compiles the project twice and
+checks whether the end results are identical.
+
+This command must be run in the source root of the project you want to
+test.
+
+{{ reprotest_arguments.inc }}
+
+#### Examples
+
+    meson reprotest
+
+Builds the current project with its default settings.
+
+    meson reprotest --intermediaries -- --buildtype=debugoptimized
+
+Builds the target and also checks that all intermediate files like
+object files are also identical. All command line arguments after the
+`--` are passed directly to the underlying `meson` invocation. Only
+use option arguments, i.e. those that start with a dash, Meson sets
+directory arguments automatically.
 
 ### rewrite
 
@@ -396,3 +424,86 @@ format should be used. There are currently 3 formats supported:
   seems to be properly supported by vscode.
 
 {{ devenv_arguments.inc }}
+
+
+### format
+
+*(since 1.5.0)*
+
+{{ format_usage.inc }}
+
+Format specified `meson.build` documents. For compatibility with `muon`, `fmt`
+is an alias to `format`.
+
+{{ format_arguments.inc }}
+
+The configuration file is a `.ini` file. If a `meson.format` file exists
+beside the provided build file to analyze, and no configuration file is
+provided on the command line, the `meson.format` file is automatically used.
+
+If no build file is provided on the command line, the `meson.build` file in
+current directory is analyzed.
+
+The following options are recognized:
+
+- max_line_length (int): When an array, a dict, a function or a method
+    would be longer that this, it is formatted one argument per line
+    (Default is 80).
+- indent_by (str): Indentation to use (Default is four spaces `'    '`).
+- space_array (bool): Whether to add spaces between `[]` and array
+    arguments (default is false).
+- kwargs_force_multiline (bool): If true, arguments are formatted one per
+    line as soon as there is a keyword argument (default is false).
+- wide_colon (bool): If true, a space is placed before colon in dict
+    and in keyword arguments (default is false).
+- no_single_comma_function (bool): If true, a comma is never appended
+    to function arguments if there is only one argument, even if
+    using multiline arguments (default is false).
+- end_of_line ('cr', 'lf', 'crlf', 'native'): Line ending to use
+    (applied when using `--output` or `--inline` argument) (default
+    is 'native).
+- indent_before_comments (str): Indentation to use before inline comments
+    (default is two spaces `'  '`).
+- simplify_string_literals (bool): When true, multiline strings are
+    converted to single line strings if they don't contain newlines.
+    Formatted strings are converted to normal strings if they don't
+    contain substitutions (default is true).
+- insert_final_newline (bool): If true, force the `meson.build` file
+    to end with a newline character (default is true).
+- tab_width (int): Width of tab stops, used to compute line length
+    when `indent_by` uses tab characters (default is 4).
+- sort_files (bool): When true, arguments of `files()` function are
+    sorted alphabetically (default is true).
+- group_arg_value (bool): When true, string argument with `--` prefix
+    followed by string argument without `--` prefix are grouped on the
+    same line, in multiline arguments (default is false).
+- use_editor_config (bool): When true, also uses config from .editorconfig .
+
+The first six options are the same than for the `muon fmt` command.
+
+It is also possible to use a `.editorconfig` file, by providing
+the `--editor-config` option on the command line, or with the
+`use_editor_config` option in the config file.
+
+When `--recursive` option is specified, `meson.build` files from
+`subdir` are also analyzed (must be used in conjunction with `--inplace`
+or `--check-only` option).
+
+*Since 1.7.0* You can use `-` as source file name to read source from standard
+input instead of reading it from a file. This cannot be used with `--recursive`
+or `--inline` arguments.
+
+
+#### Differences with `muon fmt`
+
+The `meson format` command should be compatible with the `muon fmt` command.
+However, it has more features, and some differences:
+
+- By default, `meson format` put two spaces before inline comments,
+  while `muon fmt` only puts one.
+- `muon fmt` can potentially mix crlf and lf end-of-lines, as it is not aware
+  of them. `meson format` will always be consistent in the output it produces.
+- `muon fmt` only recognize the `indent_by` option from .editorconfig files.
+  `meson format` also recognizes `max_line_length`, `end_of_line`,
+  `insert_final_newline` and `tab_width` options.
+- `meson format` has many additional format rules (see option list above).

@@ -91,6 +91,11 @@ if host_machine.system() != 'darwin'
   attributes += 'alloc_size'
 endif
 
+# gcc doesn't support constructor_priority on darwin
+if c.get_id() == 'gcc' and host_machine.system() == 'darwin'
+  expected += {'constructor_priority': false}
+endif
+
 if ['gcc', 'intel'].contains(c.get_id())
   # not supported by clang as of 5.0.0 (at least up to 6.0.1)
   attributes += 'artificial'
@@ -109,6 +114,12 @@ if ['gcc', 'intel'].contains(c.get_id())
   # detects support for it at compile time based on binutils version
   if c.get_id() == 'clang' and c.version().version_compare('>= 13.0.0')
     attributes += 'retain'
+  endif
+endif
+
+if c.get_id() == 'gcc'
+  if c.version().version_compare('>= 14.1')
+    attributes += 'null_terminated_string_arg'
   endif
 endif
 

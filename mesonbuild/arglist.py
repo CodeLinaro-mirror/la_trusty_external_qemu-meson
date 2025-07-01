@@ -1,17 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2012-2020 The Meson development team
-# Copyright © 2020 Intel Corporation
+# Copyright © 2020-2023 Intel Corporation
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 from functools import lru_cache
@@ -39,7 +29,7 @@ class Dedup(enum.Enum):
         same is true for include paths and library paths with -I and -L.
     UNIQUE - Arguments that once specified cannot be undone, such as `-c` or
         `-pipe`. New instances of these can be completely skipped.
-    NO_DEDUP - Whether it matters where or how many times on the command-line
+    NO_DEDUP - When it matters where or how many times on the command-line
         a particular argument is present. This can matter for symbol
         resolution in static or shared libraries, so we cannot de-dup or
         reorder them.
@@ -84,12 +74,12 @@ class CompilerArgs(T.MutableSequence[str]):
     # Arg prefixes that override by prepending instead of appending
     prepend_prefixes: T.Tuple[str, ...] = ()
 
-    # Arg prefixes and args that must be de-duped by returning 2
+    # Arg prefixes and standalone args that must be de-duped by returning 2
     dedup2_prefixes: T.Tuple[str, ...] = ()
     dedup2_suffixes: T.Tuple[str, ...] = ()
     dedup2_args: T.Tuple[str, ...] = ()
 
-    # Arg prefixes and args that must be de-duped by returning 1
+    # Arg prefixes and standalone args that must be de-duped by returning 1
     #
     # NOTE: not thorough. A list of potential corner cases can be found in
     # https://github.com/mesonbuild/meson/pull/4593#pullrequestreview-182016038
@@ -107,15 +97,32 @@ class CompilerArgs(T.MutableSequence[str]):
     def __init__(self, compiler: T.Union['Compiler', 'StaticLinker'],
                  iterable: T.Optional[T.Iterable[str]] = None):
         self.compiler = compiler
+
+        if isinstance(iterable, CompilerArgs):
+            iterable.flush_pre_post()
+            # list(iter(x)) is over two times slower than list(x), so
+            # pass the underlying list to list() directly, instead of an iterator
+            iterable = iterable._container
         self._container: T.List[str] = list(iterable) if iterable is not None else []
+
         self.pre: T.Deque[str] = collections.deque()
-        self.post: T.Deque[str] = collections.deque()
+        self.post: T.List[str] = []
+        self.needs_override_check: bool = False
 
     # Flush the saved pre and post list into the _container list
     #
     # This correctly deduplicates the entries after _can_dedup definition
     # Note: This function is designed to work without delete operations, as deletions are worsening the performance a lot.
     def flush_pre_post(self) -> None:
+        if not self.needs_override_check:
+            if self.pre:
+                self._container[0:0] = self.pre
+                self.pre.clear()
+            if self.post:
+                self._container.extend(self.post)
+                self.post.clear()
+            return
+
         new: T.List[str] = []
         pre_flush_set: T.Set[str] = set()
         post_flush: T.Deque[str] = collections.deque()
@@ -137,19 +144,18 @@ class CompilerArgs(T.MutableSequence[str]):
 
         #pre and post will overwrite every element that is in the container
         #only copy over args that are in _container but not in the post flush or pre flush set
-        if pre_flush_set or post_flush_set:
-            for a in self._container:
-                if a not in post_flush_set and a not in pre_flush_set:
-                    new.append(a)
-        else:
-            new.extend(self._container)
+        for a in self._container:
+            if a not in post_flush_set and a not in pre_flush_set:
+                new.append(a)
         new.extend(post_flush)
 
         self._container = new
         self.pre.clear()
         self.post.clear()
+        self.needs_override_check = False
 
     def __iter__(self) -> T.Iterator[str]:
+        # see also __init__, where this method is essentially inlined
         self.flush_pre_post()
         return iter(self._container)
 
@@ -203,15 +209,16 @@ class CompilerArgs(T.MutableSequence[str]):
         with other linkers.
         """
 
-        # A standalone argument must never be deduplicated because it is
-        # defined by what comes _after_ it. Thus deduping this:
+        # Argument prefixes that are actually not used as a prefix must never
+        # be deduplicated because they are defined by what comes _after_ them.
+        # Thus deduping this:
         # -D FOO -D BAR
         # would yield either
         # -D FOO BAR
         # or
         # FOO -D BAR
         # both of which are invalid.
-        if arg in cls.dedup2_prefixes:
+        if arg in cls.dedup1_prefixes or arg in cls.dedup2_prefixes:
             return Dedup.NO_DEDUP
         if arg in cls.dedup2_args or \
            arg.startswith(cls.dedup2_prefixes) or \
@@ -297,6 +304,8 @@ class CompilerArgs(T.MutableSequence[str]):
                 # Argument already exists and adding a new instance is useless
                 if arg in self._container or arg in self.pre or arg in self.post:
                     continue
+            elif dedup is Dedup.OVERRIDDEN:
+                self.needs_override_check = True
             if self._should_prepend(arg):
                 tmp_pre.appendleft(arg)
             else:

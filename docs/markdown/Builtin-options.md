@@ -76,9 +76,10 @@ machine](#specifying-options-per-machine) section for details.
 | -------------------------------------- | ------------- | -----------                                                    | -------------- | ----------------- |
 | auto_features {enabled, disabled, auto} | auto         | Override value of all 'auto' features                          | no             | no                |
 | backend {ninja, vs,<br>vs2010, vs2012, vs2013, vs2015, vs2017, vs2019, vs2022, xcode, none} | ninja | Backend to use    | no             | no                |
-| genvslite {vs2022}                     | vs2022        | Setup multi-builtype ninja build directories and Visual Studio solution | no | no |
+| genvslite {vs2022}                     | vs2022        | Setup multi-buildtype ninja build directories and Visual Studio solution | no | no |
 | buildtype {plain, debug,<br>debugoptimized, release, minsize, custom} | debug | Build type to use                       | no             | no                |
 | debug                                  | true          | Enable debug symbols and other information                     | no             | no                |
+| default_both_libraries {shared, static, auto} | shared | Default library type for both_libraries                        | no             | no                |
 | default_library {shared, static, both} | shared        | Default library type                                           | no             | yes               |
 | errorlogs                              | true          | Whether to print the logs from failing tests.                  | no             | no                |
 | install_umask {preserve, 0000-0777}    | 022           | Default umask to apply on permissions of installed files       | no             | no                |
@@ -91,11 +92,13 @@ machine](#specifying-options-per-machine) section for details.
 | strip                                  | false         | Strip targets on install                                       | no             | no                |
 | unity {on, off, subprojects}           | off           | Unity build                                                    | no             | no                |
 | unity_size {>=2}                       | 4             | Unity file block size                                          | no             | no                |
-| warning_level {0, 1, 2, 3, everything} | 1             | Set the warning level. From 0 = none to everything = highest   | no             | yes               |
+| warning_level {0, 1, 2, 3, everything} | 1             | Set the warning level. From 0 = compiler default to everything = highest | no   | yes               |
 | werror                                 | false         | Treat warnings as errors                                       | no             | yes               |
 | wrap_mode {default, nofallback,<br>nodownload, forcefallback, nopromote} | default | Wrap mode to use                   | no             | no                |
 | force_fallback_for                     | []            | Force fallback for those dependencies                          | no             | no                |
 | vsenv                                  | false         | Activate Visual Studio environment                             | no             | no                |
+
+(For the Rust language only, `warning_level=0` disables all warnings).
 
 #### Details for `backend`
 
@@ -112,7 +115,7 @@ for a lighter automated build pipeline.
 Setup multiple buildtype-suffixed, ninja-backend build directories (e.g.
 [builddir]_[debug/release/etc.]) and generate [builddir]_vs containing a Visual
 Studio solution with multiple configurations that invoke a meson compile of the
-setup build directories, as appropriate for the current configuration (builtype).
+setup build directories, as appropriate for the current configuration (buildtype).
 
 This has the effect of a simple setup macro of multiple 'meson setup ...'
 invocations with a set of different buildtype values.  E.g.
@@ -149,7 +152,7 @@ All other combinations of `debug` and `optimization` set `buildtype` to `'custom
 
 #### Details for `warning_level`
 
-Exact flags per warning level is compiler specific, but there is an approximative
+Exact flags per warning level is compiler specific, but there is an approximate
 table for most common compilers.
 
 | Warning level | GCC/Clang                | MSVC  |
@@ -176,6 +179,24 @@ compilers are found. It also make Meson abort with an error message when activat
 fails.
 
 `vsenv` is `true` by default when using the `vs` backend.
+
+
+#### Details for `default_both_libraries`
+
+Since `1.6.0`, you can specify the default type of library selected when using a
+`both_libraries` object with `default_both_libraries`. Note that, unlike
+`default_library`, this option does not affect how the library artifacts are
+built, but how they are internally linked to the dependent targets within the
+same project.
+
+The possible values of this option are 'shared' (default value, compatible with
+previous meson versions), 'static', and 'auto'. With auto, the value from the
+`default_library` option is used, unless it is 'both', in which case 'shared' is
+used instead.
+
+When `default_both_libraries` is 'auto', passing a [[@both_libs]] dependency
+in [[both_libraries]] will link the static dependency with the static lib,
+and the shared dependency with the shared lib.
 
 ## Base options
 
@@ -210,10 +231,20 @@ available on all platforms or with all compilers:
 | b_pie               | false                | true, false                                                   | Build position-independent executables (since 0.49.0)                          |
 | b_vscrt             | from_buildtype       | none, md, mdd, mt, mtd, from_buildtype, static_from_buildtype | VS runtime library to use (since 0.48.0) (static_from_buildtype since 0.56.0)  |
 
-The value of `b_sanitize` can be one of: `none`, `address`, `thread`,
-`undefined`, `memory`, `leak`, `address,undefined`, but note that some
-compilers might not support all of them. For example Visual Studio
-only supports the address sanitizer.
+The default and possible values of sanitizers changed in 1.8. Before 1.8 they
+were string values, and restricted to a specific subset of values: `none`,
+`address`, `thread`, `undefined`, `memory`, `leak`, or `address,undefined`. In
+1.8 it was changed to a free form array of sanitizers, which are checked by a
+compiler and linker check. For backwards compatibility reasons
+`get_option('b_sanitize')` continues to return a string with the array values
+separated by a comma. Furthermore:
+
+ - If the `b_sanitize` option is empty, the `'none'` string is returned.
+
+ - If it contains only the values `'address'` and `'undefined'`, they are
+   always returned as the `'address,undefined'` string, in this order.
+
+ - Otherwise, the array elements are returned in undefined order.
 
 \* < 0 means disable, == 0 means automatic selection, > 0 sets a specific number to use
 
@@ -241,8 +272,7 @@ with `b_asneeded`, so that option will be silently disabled.
 
 [[shared_module]]s will not have
 bitcode embedded because `-Wl,-bitcode_bundle` is incompatible with
-both `-bundle` and `-Wl,-undefined,dynamic_lookup` which are necessary
-for shared modules to work.
+`-Wl,-undefined,dynamic_lookup` which is necessary for shared modules to work.
 
 ## Compiler options
 
@@ -257,7 +287,7 @@ or compiler being used:
 | ------           | ------------- | ---------------                          | ----------- |
 | c_args           |               | free-form comma-separated list           | C compile arguments to use |
 | c_link_args      |               | free-form comma-separated list           | C link arguments to use |
-| c_std            | none          | none, c89, c99, c11, c17, c18, c2x, gnu89, gnu99, gnu11, gnu17, gnu18, gnu2x | C language standard to use |
+| c_std            | none          | none, c89, c99, c11, c17, c18, c2x, c23, c2y, gnu89, gnu99, gnu11, gnu17, gnu18, gnu2x, gnu23, gnu2y | C language standard to use |
 | c_winlibs        | see below     | free-form comma-separated list           | Standard Windows libs to link against |
 | c_thread_count   | 4             | integer value ≥ 0                        | Number of threads to use with emcc when using threads |
 | cpp_args         |               | free-form comma-separated list           | C++ compile arguments to use |
@@ -280,11 +310,11 @@ All these `<lang>_*` options are specified per machine. See below in
 the [specifying options per machine](#specifying-options-per-machine)
 section on how to do this in cross builds.
 
-When using MSVC, `cpp_eh=none` will result in no exception flags being
-passed, while the `cpp_eh=[value]` will result in `/EH[value]`. Since
-*0.51.0* `cpp_eh=default` will result in `/EHsc` on MSVC. When using
-gcc-style compilers, nothing is passed (allowing exceptions to work),
-while `cpp_eh=none` passes `-fno-exceptions`.
+When using MSVC, `cpp_eh=[value]` will result in `/EH[value]` being passed.
+The magic value `none` translates to `s-c-` to disable exceptions. *Since
+0.51.0* `default` translates to `sc`. When using gcc-style compilers, nothing
+is passed (allowing exceptions to work), while `cpp_eh=none` passes
+`-fno-exceptions`.
 
 Since *0.54.0* The `<lang>_thread_count` option can be used to control
 the value passed to `-s PTHREAD_POOL_SIZE` when using emcc. No other
@@ -408,7 +438,8 @@ interpreter directly, even if it is a venv. Setting to `venv` will instead use
 the paths for the virtualenv the python found installation comes from (or fail
 if it is not a virtualenv).  Setting to `auto` will check if the found
 installation is a virtualenv, and use `venv` or `system` as appropriate (but
-never `prefix`). This option is mutually exclusive with the `platlibdir`/`purelibdir`.
+never `prefix`). Note that Conda environments are treated as `system`.
+This option is mutually exclusive with the `platlibdir`/`purelibdir`.
 
 For backwards compatibility purposes, the default `install_env` is `prefix`.
 

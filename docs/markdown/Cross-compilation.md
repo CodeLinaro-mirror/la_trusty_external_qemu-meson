@@ -14,6 +14,7 @@ targeting 64-bit Windows could be:
 c = 'x86_64-w64-mingw32-gcc'
 cpp = 'x86_64-w64-mingw32-g++'
 ar = 'x86_64-w64-mingw32-ar'
+windres = 'x86_64-w64-mingw32-windres'
 strip = 'x86_64-w64-mingw32-strip'
 exe_wrapper = 'wine64'
 
@@ -84,7 +85,7 @@ their user interface much more complex.
 
 The most complicated case is when you cross-compile a cross compiler.
 As an example you can, on a Linux machine, generate a cross compiler
-that runs on Windows but produces binaries on MIPS Linux. In this case
+that runs on Windows but produces binaries for MIPS Linux. In this case
 *build machine* is x86 Linux, *host machine* is x86 Windows and
 *target machine* is MIPS Linux. This setup is known as the [Canadian
 Cross](https://en.wikipedia.org/wiki/Cross_compiler#Canadian_Cross).
@@ -256,7 +257,7 @@ to be the host machine.
 Once you have the cross file, starting a build is simple
 
 ```console
-$ meson srcdir builddir --cross-file cross_file.txt
+$ meson setup builddir --cross-file cross_file.txt
 ```
 
 Once configuration is done, compilation is started by invoking `meson compile`

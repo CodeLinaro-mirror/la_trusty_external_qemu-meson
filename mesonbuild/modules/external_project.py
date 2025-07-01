@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2020 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 from pathlib import Path
@@ -29,7 +19,8 @@ from ..interpreterbase import FeatureNew
 from ..interpreter.type_checking import ENV_KW, DEPENDS_KW
 from ..interpreterbase.decorators import ContainerTypeInfo, KwargInfo, typed_kwargs, typed_pos_args
 from ..mesonlib import (EnvironmentException, MesonException, Popen_safe, MachineChoice,
-                        get_variable_regex, do_replacement, join_args, OptionKey)
+                        get_variable_regex, do_replacement, join_args, relpath)
+from ..options import OptionKey
 
 if T.TYPE_CHECKING:
     from typing_extensions import TypedDict
@@ -75,8 +66,6 @@ class ExternalProject(NewExtensionModule):
         self.project_version = state.project_version
         self.subproject = state.subproject
         self.env = state.environment
-        self.build_machine = state.build_machine
-        self.host_machine = state.host_machine
         self.configure_command = configure_command
         self.configure_options = configure_options
         self.cross_configure_options = cross_configure_options
@@ -86,13 +75,16 @@ class ExternalProject(NewExtensionModule):
         self.src_dir = Path(self.env.get_source_dir(), self.subdir)
         self.build_dir = Path(self.env.get_build_dir(), self.subdir, 'build')
         self.install_dir = Path(self.env.get_build_dir(), self.subdir, 'dist')
-        _p = self.env.coredata.get_option(OptionKey('prefix'))
+        _p = self.env.coredata.optstore.get_value_for(OptionKey('prefix'))
         assert isinstance(_p, str), 'for mypy'
         self.prefix = Path(_p)
-        _l = self.env.coredata.get_option(OptionKey('libdir'))
+        _l = self.env.coredata.optstore.get_value_for(OptionKey('libdir'))
         assert isinstance(_l, str), 'for mypy'
         self.libdir = Path(_l)
-        _i = self.env.coredata.get_option(OptionKey('includedir'))
+        _l = self.env.coredata.optstore.get_value_for(OptionKey('bindir'))
+        assert isinstance(_l, str), 'for mypy'
+        self.bindir = Path(_l)
+        _i = self.env.coredata.optstore.get_value_for(OptionKey('includedir'))
         assert isinstance(_i, str), 'for mypy'
         self.includedir = Path(_i)
         self.name = self.src_dir.name
@@ -101,10 +93,10 @@ class ExternalProject(NewExtensionModule):
         # will install files into "c:/bar/c:/foo" which is an invalid path.
         # Work around that issue by removing the drive from prefix.
         if self.prefix.drive:
-            self.prefix = self.prefix.relative_to(self.prefix.drive)
+            self.prefix = Path(relpath(self.prefix, self.prefix.drive))
 
         # self.prefix is an absolute path, so we cannot append it to another path.
-        self.rel_prefix = self.prefix.relative_to(self.prefix.root)
+        self.rel_prefix = Path(relpath(self.prefix, self.prefix.root))
 
         self._configure(state)
 
@@ -129,6 +121,7 @@ class ExternalProject(NewExtensionModule):
 
         d = [('PREFIX', '--prefix=@PREFIX@', self.prefix.as_posix()),
              ('LIBDIR', '--libdir=@PREFIX@/@LIBDIR@', self.libdir.as_posix()),
+             ('BINDIR', '--bindir=@PREFIX@/@BINDIR@', self.bindir.as_posix()),
              ('INCLUDEDIR', None, self.includedir.as_posix()),
              ]
         self._validate_configure_options(d, state)
@@ -136,9 +129,10 @@ class ExternalProject(NewExtensionModule):
         configure_cmd += self._format_options(self.configure_options, d)
 
         if self.env.is_cross_build():
-            host = '{}-{}-{}'.format(self.host_machine.cpu_family,
-                                     self.build_machine.system,
-                                     self.host_machine.system)
+            host = '{}-{}-{}'.format(state.environment.machines.host.cpu,
+                                     'pc' if state.environment.machines.host.cpu_family in {"x86", "x86_64"}
+                                     else 'unknown',
+                                     state.environment.machines.host.system)
             d = [('HOST', None, host)]
             configure_cmd += self._format_options(self.cross_configure_options, d)
 
@@ -288,6 +282,7 @@ class ExternalProjectModule(ExtensionModule):
 
     def __init__(self, interpreter: 'Interpreter'):
         super().__init__(interpreter)
+        self.devenv: T.Optional[EnvironmentVariables] = None
         self.methods.update({'add_project': self.add_project,
                              })
 
@@ -309,7 +304,18 @@ class ExternalProjectModule(ExtensionModule):
                                   kwargs['env'],
                                   kwargs['verbose'],
                                   kwargs['depends'])
+        abs_libdir = Path(project.install_dir, project.rel_prefix, project.libdir).as_posix()
+        abs_bindir = Path(project.install_dir, project.rel_prefix, project.bindir).as_posix()
+        env = state.environment.get_env_for_paths({abs_libdir}, {abs_bindir})
+        if self.devenv is None:
+            self.devenv = env
+        else:
+            self.devenv.merge(env)
         return ModuleReturnValue(project, project.targets)
+
+    def postconf_hook(self, b: build.Build) -> None:
+        if self.devenv is not None:
+            b.devenv.append(self.devenv)
 
 
 def initialize(interp: 'Interpreter') -> ExternalProjectModule:

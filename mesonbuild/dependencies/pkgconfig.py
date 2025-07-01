@@ -1,22 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2013-2021 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 from pathlib import Path
 
 from .base import ExternalDependency, DependencyException, sort_libpaths, DependencyTypeName
-from ..mesonlib import EnvironmentVariables, OptionKey, OrderedSet, PerMachine, Popen_safe, Popen_safe_logged, MachineChoice, join_args
+from ..mesonlib import (EnvironmentVariables, OrderedSet, PerMachine, Popen_safe, Popen_safe_logged, MachineChoice,
+                        join_args, MesonException)
+from ..options import OptionKey
 from ..programs import find_external_program, ExternalProgram
 from .. import mlog
 from pathlib import PurePath
@@ -39,6 +31,14 @@ class PkgConfigInterface:
 
     class_impl: PerMachine[T.Union[Literal[False], T.Optional[PkgConfigInterface]]] = PerMachine(False, False)
     class_cli_impl: PerMachine[T.Union[Literal[False], T.Optional[PkgConfigCLI]]] = PerMachine(False, False)
+    pkg_bin_per_machine: PerMachine[T.Optional[ExternalProgram]] = PerMachine(None, None)
+
+    @staticmethod
+    def set_program_override(pkg_bin: ExternalProgram, for_machine: MachineChoice) -> None:
+        if PkgConfigInterface.class_impl[for_machine]:
+            raise MesonException(f'Tried to override pkg-config for machine {for_machine} but it was already initialized.\n'
+                                 'pkg-config must be overridden before it\'s used.')
+        PkgConfigInterface.pkg_bin_per_machine[for_machine] = pkg_bin
 
     @staticmethod
     def instance(env: Environment, for_machine: MachineChoice, silent: bool) -> T.Optional[PkgConfigInterface]:
@@ -46,7 +46,7 @@ class PkgConfigInterface:
         for_machine = for_machine if env.is_cross_build() else MachineChoice.HOST
         impl = PkgConfigInterface.class_impl[for_machine]
         if impl is False:
-            impl = PkgConfigCLI(env, for_machine, silent)
+            impl = PkgConfigCLI(env, for_machine, silent, PkgConfigInterface.pkg_bin_per_machine[for_machine])
             if not impl.found():
                 impl = None
             if not impl and not silent:
@@ -66,7 +66,7 @@ class PkgConfigInterface:
         if impl and not isinstance(impl, PkgConfigCLI):
             impl = PkgConfigInterface.class_cli_impl[for_machine]
             if impl is False:
-                impl = PkgConfigCLI(env, for_machine, silent)
+                impl = PkgConfigCLI(env, for_machine, silent, PkgConfigInterface.pkg_bin_per_machine[for_machine])
                 if not impl.found():
                     impl = None
                 PkgConfigInterface.class_cli_impl[for_machine] = impl
@@ -122,9 +122,10 @@ class PkgConfigInterface:
 class PkgConfigCLI(PkgConfigInterface):
     '''pkg-config CLI implementation'''
 
-    def __init__(self, env: Environment, for_machine: MachineChoice, silent: bool) -> None:
+    def __init__(self, env: Environment, for_machine: MachineChoice, silent: bool,
+                 pkgbin: T.Optional[ExternalProgram] = None) -> None:
         super().__init__(env, for_machine)
-        self._detect_pkgbin()
+        self._detect_pkgbin(pkgbin)
         if self.pkgbin and not silent:
             mlog.log('Found pkg-config:', mlog.green('YES'), mlog.bold(f'({self.pkgbin.get_path()})'), mlog.blue(self.pkgbin_version))
 
@@ -209,14 +210,21 @@ class PkgConfigCLI(PkgConfigInterface):
         # output using shlex.split rather than mesonlib.split_args
         return shlex.split(cmd)
 
-    def _detect_pkgbin(self) -> None:
-        for potential_pkgbin in find_external_program(
-                self.env, self.for_machine, 'pkg-config', 'Pkg-config',
-                self.env.default_pkgconfig, allow_default_for_cross=False):
+    def _detect_pkgbin(self, pkgbin: T.Optional[ExternalProgram] = None) -> None:
+        def validate(potential_pkgbin: ExternalProgram) -> bool:
             version_if_ok = self._check_pkgconfig(potential_pkgbin)
             if version_if_ok:
                 self.pkgbin = potential_pkgbin
                 self.pkgbin_version = version_if_ok
+                return True
+            return False
+
+        if pkgbin and validate(pkgbin):
+            return
+
+        for potential_pkgbin in find_external_program(self.env, self.for_machine, "pkg-config", "Pkg-config",
+                                                      self.env.default_pkgconfig, allow_default_for_cross=False):
+            if validate(potential_pkgbin):
                 return
         self.pkgbin = None
 
@@ -248,11 +256,16 @@ class PkgConfigCLI(PkgConfigInterface):
     def _get_env(self, uninstalled: bool = False) -> EnvironmentVariables:
         env = EnvironmentVariables()
         key = OptionKey('pkg_config_path', machine=self.for_machine)
-        extra_paths: T.List[str] = self.env.coredata.options[key].value[:]
+        pathlist = self.env.coredata.optstore.get_value_for(key)
+        assert isinstance(pathlist, list)
+        extra_paths: T.List[str] = pathlist[:]
         if uninstalled:
-            uninstalled_path = Path(self.env.get_build_dir(), 'meson-uninstalled').as_posix()
-            if uninstalled_path not in extra_paths:
-                extra_paths.append(uninstalled_path)
+            bpath = self.env.get_build_dir()
+            if bpath is not None:
+                # uninstalled can only be used if a build dir exists.
+                uninstalled_path = Path(bpath, 'meson-uninstalled').as_posix()
+                if uninstalled_path not in extra_paths:
+                    extra_paths.insert(0, uninstalled_path)
         env.set('PKG_CONFIG_PATH', extra_paths)
         sysroot = self.env.properties[self.for_machine].get_sys_root()
         if sysroot:
@@ -283,17 +296,19 @@ class PkgConfigCLI(PkgConfigInterface):
 
 class PkgConfigDependency(ExternalDependency):
 
-    def __init__(self, name: str, environment: Environment, kwargs: T.Dict[str, T.Any], language: T.Optional[str] = None) -> None:
+    def __init__(self, name: str, environment: Environment, kwargs: T.Dict[str, T.Any],
+                 language: T.Optional[str] = None) -> None:
         super().__init__(DependencyTypeName('pkgconfig'), environment, kwargs, language=language)
         self.name = name
         self.is_libtool = False
-        self.pkgconfig = PkgConfigInterface.instance(self.env, self.for_machine, self.silent)
-        if not self.pkgconfig:
+        pkgconfig = PkgConfigInterface.instance(self.env, self.for_machine, self.silent)
+        if not pkgconfig:
             msg = f'Pkg-config for machine {self.for_machine} not found. Giving up.'
             if self.required:
                 raise DependencyException(msg)
             mlog.debug(msg)
             return
+        self.pkgconfig = pkgconfig
 
         version = self.pkgconfig.version(name)
         if version is None:
@@ -406,7 +421,7 @@ class PkgConfigDependency(ExternalDependency):
         #
         # Only prefix_libpaths are reordered here because there should not be
         # too many system_libpaths to cause library version issues.
-        pkg_config_path: T.List[str] = self.env.coredata.options[OptionKey('pkg_config_path', machine=self.for_machine)].value
+        pkg_config_path: T.List[str] = self.env.coredata.optstore.get_value(OptionKey('pkg_config_path', machine=self.for_machine)) # type: ignore[assignment]
         pkg_config_path = self._convert_mingw_paths(pkg_config_path)
         prefix_libpaths = OrderedSet(sort_libpaths(list(prefix_libpaths), pkg_config_path))
         system_libpaths: OrderedSet[str] = OrderedSet()
@@ -565,7 +580,7 @@ class PkgConfigDependency(ExternalDependency):
 
     def get_variable(self, *, cmake: T.Optional[str] = None, pkgconfig: T.Optional[str] = None,
                      configtool: T.Optional[str] = None, internal: T.Optional[str] = None,
-                     default_value: T.Optional[str] = None,
+                     system: T.Optional[str] = None, default_value: T.Optional[str] = None,
                      pkgconfig_define: PkgConfigDefineType = None) -> str:
         if pkgconfig:
             try:

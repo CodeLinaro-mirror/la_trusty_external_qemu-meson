@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2014-2017 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 from dataclasses import dataclass, field
 import re
@@ -104,8 +94,15 @@ class Token(T.Generic[TV_TokenTypes]):
             return self.tid == other.tid
         return NotImplemented
 
+
+IDENT_RE = re.compile('[_a-zA-Z][_0-9a-zA-Z]*')
+
 class Lexer:
     def __init__(self, code: str):
+        if code.startswith(codecs.BOM_UTF8.decode('utf-8')):
+            line, *_ = code.split('\n', maxsplit=1)
+            raise ParseException('Builder file must be encoded in UTF-8 (with no BOM)', line, lineno=0, colno=0)
+
         self.code = code
         self.keywords = {'true', 'false', 'if', 'else', 'elif',
                          'endif', 'and', 'or', 'not', 'foreach', 'endforeach',
@@ -119,7 +116,7 @@ class Lexer:
             ('whitespace', re.compile(r'[ \t]+')),
             ('multiline_fstring', re.compile(r"f'''(.|\n)*?'''", re.M)),
             ('fstring', re.compile(r"f'([^'\\]|(\\.))*'")),
-            ('id', re.compile('[_a-zA-Z][_0-9a-zA-Z]*')),
+            ('id', IDENT_RE),
             ('number', re.compile(r'0[bB][01]+|0[oO][0-7]+|0[xX][0-9a-fA-F]+|0|[1-9]\d*')),
             ('eol_cont', re.compile(r'\\[ \t]*(#.*)?\n')),
             ('eol', re.compile(r'\n')),
@@ -272,6 +269,8 @@ class WhitespaceNode(BaseNode):
         super().__init__(token.lineno, token.colno, token.filename)
         self.value = ''
         self.append(token)
+        self.block_indent = False
+        self.is_continuation = False
 
     def append(self, token: Token[str]) -> None:
         self.value += token.value
@@ -304,31 +303,25 @@ class NumberNode(ElementaryNode[int]):
         self.value = int(token.value, base=0)
         self.bytespan = token.bytespan
 
-class BaseStringNode(ElementaryNode[str]):
-    pass
-
 @dataclass(unsafe_hash=True)
-class StringNode(BaseStringNode):
+class StringNode(ElementaryNode[str]):
 
     raw_value: str = field(hash=False)
+    is_multiline: bool
+    is_fstring: bool
 
     def __init__(self, token: Token[str], escape: bool = True):
         super().__init__(token)
-        self.value = ESCAPE_SEQUENCE_SINGLE_RE.sub(decode_match, token.value) if escape else token.value
+
+        self.is_multiline = 'multiline' in token.tid
+        self.is_fstring = 'fstring' in token.tid
         self.raw_value = token.value
 
-class FormatStringNode(StringNode):
-    pass
+        if escape and not self.is_multiline:
+            self.value = self.escape()
 
-@dataclass(unsafe_hash=True)
-class MultilineStringNode(BaseStringNode):
-
-    def __init__(self, token: Token[str]):
-        super().__init__(token)
-        self.value = token.value
-
-class MultilineFormatStringNode(MultilineStringNode):
-    pass
+    def escape(self) -> str:
+        return ESCAPE_SEQUENCE_SINGLE_RE.sub(decode_match, self.raw_value)
 
 class ContinueNode(ElementaryNode):
     pass
@@ -344,16 +337,19 @@ class ArgumentNode(BaseNode):
 
     arguments: T.List[BaseNode] = field(hash=False)
     commas: T.List[SymbolNode] = field(hash=False)
-    columns: T.List[SymbolNode] = field(hash=False)
+    colons: T.List[SymbolNode] = field(hash=False)
     kwargs: T.Dict[BaseNode, BaseNode] = field(hash=False)
 
     def __init__(self, token: Token[TV_TokenTypes]):
         super().__init__(token.lineno, token.colno, token.filename)
         self.arguments = []
         self.commas = []
-        self.columns = []
+        self.colons = []
         self.kwargs = {}
         self.order_error = False
+
+        # Attributes for the visitors
+        self.is_multiline = False
 
     def prepend(self, statement: BaseNode) -> None:
         if self.num_kwargs() > 0:
@@ -370,7 +366,7 @@ class ArgumentNode(BaseNode):
     def set_kwarg(self, name: IdNode, value: BaseNode) -> None:
         if any((isinstance(x, IdNode) and name.value == x.value) for x in self.kwargs):
             mlog.warning(f'Keyword argument "{name.value}" defined multiple times.', location=self)
-            mlog.warning('This will be an error in future Meson releases.')
+            mlog.warning('This will be an error in Meson 2.0.')
         self.kwargs[name] = value
 
     def set_kwarg_no_check(self, name: BaseNode, value: BaseNode) -> None:
@@ -386,7 +382,7 @@ class ArgumentNode(BaseNode):
         return self.order_error
 
     def __len__(self) -> int:
-        return self.num_args() # Fixme
+        return self.num_args() + self.num_kwargs()
 
 @dataclass(unsafe_hash=True)
 class ArrayNode(BaseNode):
@@ -562,17 +558,17 @@ class ForeachClauseNode(BaseNode):
     foreach_: SymbolNode = field(hash=False)
     varnames: T.List[IdNode] = field(hash=False)
     commas: T.List[SymbolNode] = field(hash=False)
-    column: SymbolNode = field(hash=False)
+    colon: SymbolNode = field(hash=False)
     items: BaseNode
     block: CodeBlockNode
     endforeach: SymbolNode = field(hash=False)
 
-    def __init__(self, foreach_: SymbolNode, varnames: T.List[IdNode], commas: T.List[SymbolNode], column: SymbolNode, items: BaseNode, block: CodeBlockNode, endforeach: SymbolNode):
+    def __init__(self, foreach_: SymbolNode, varnames: T.List[IdNode], commas: T.List[SymbolNode], colon: SymbolNode, items: BaseNode, block: CodeBlockNode, endforeach: SymbolNode):
         super().__init__(foreach_.lineno, foreach_.colno, foreach_.filename)
         self.foreach_ = foreach_
         self.varnames = varnames
         self.commas = commas
-        self.column = column
+        self.colon = colon
         self.items = items
         self.block = block
         self.endforeach = endforeach
@@ -613,7 +609,6 @@ class IfClauseNode(BaseNode):
         super().__init__(linenode.lineno, linenode.colno, linenode.filename)
         self.ifs = []
         self.elseblock = EmptyNode(linenode.lineno, linenode.colno, linenode.filename)
-        self.endif = None
 
 @dataclass(unsafe_hash=True)
 class TestCaseClauseNode(BaseNode):
@@ -636,15 +631,15 @@ class TernaryNode(BaseNode):
     condition: BaseNode
     questionmark: SymbolNode
     trueblock: BaseNode
-    column: SymbolNode
+    colon: SymbolNode
     falseblock: BaseNode
 
-    def __init__(self, condition: BaseNode, questionmark: SymbolNode, trueblock: BaseNode, column: SymbolNode, falseblock: BaseNode):
+    def __init__(self, condition: BaseNode, questionmark: SymbolNode, trueblock: BaseNode, colon: SymbolNode, falseblock: BaseNode):
         super().__init__(condition.lineno, condition.colno, condition.filename)
         self.condition = condition
         self.questionmark = questionmark
         self.trueblock = trueblock
-        self.column = column
+        self.colon = colon
         self.falseblock = falseblock
 
 
@@ -787,10 +782,10 @@ class Parser:
             self.in_ternary = True
             trueblock = self.e1()
             self.expect('colon')
-            column_node = self.create_node(SymbolNode, self.previous)
+            colon_node = self.create_node(SymbolNode, self.previous)
             falseblock = self.e1()
             self.in_ternary = False
-            return self.create_node(TernaryNode, left, qm_node, trueblock, column_node, falseblock)
+            return self.create_node(TernaryNode, left, qm_node, trueblock, colon_node, falseblock)
         return left
 
     def e2(self) -> BaseNode:
@@ -937,14 +932,8 @@ class Parser:
             return self.create_node(IdNode, t)
         if self.accept('number'):
             return self.create_node(NumberNode, t)
-        if self.accept('string'):
+        if self.accept_any(('string', 'fstring', 'multiline_string', 'multiline_fstring')):
             return self.create_node(StringNode, t)
-        if self.accept('fstring'):
-            return self.create_node(FormatStringNode, t)
-        if self.accept('multiline_string'):
-            return self.create_node(MultilineStringNode, t)
-        if self.accept('multiline_fstring'):
-            return self.create_node(MultilineFormatStringNode, t)
         return EmptyNode(self.current.lineno, self.current.colno, self.current.filename)
 
     def key_values(self) -> ArgumentNode:
@@ -953,7 +942,7 @@ class Parser:
 
         while not isinstance(s, EmptyNode):
             if self.accept('colon'):
-                a.columns.append(self.create_node(SymbolNode, self.previous))
+                a.colons.append(self.create_node(SymbolNode, self.previous))
                 a.set_kwarg_no_check(s, self.statement())
                 if not self.accept('comma'):
                     return a
@@ -973,7 +962,7 @@ class Parser:
                 a.commas.append(self.create_node(SymbolNode, self.previous))
                 a.append(s)
             elif self.accept('colon'):
-                a.columns.append(self.create_node(SymbolNode, self.previous))
+                a.colons.append(self.create_node(SymbolNode, self.previous))
                 if not isinstance(s, IdNode):
                     raise ParseException('Dictionary key must be a plain identifier.',
                                          self.getline(), s.lineno, s.colno)
@@ -1028,11 +1017,11 @@ class Parser:
             varnames.append(self.create_node(IdNode, self.previous))
 
         self.expect('colon')
-        column = self.create_node(SymbolNode, self.previous)
+        colon = self.create_node(SymbolNode, self.previous)
         items = self.statement()
         block = self.codeblock()
         endforeach = self.create_node(SymbolNode, self.current)
-        return self.create_node(ForeachClauseNode, foreach_, varnames, commas, column, items, block, endforeach)
+        return self.create_node(ForeachClauseNode, foreach_, varnames, commas, colon, items, block, endforeach)
 
     def ifblock(self) -> IfClauseNode:
         if_node = self.create_node(SymbolNode, self.previous)
@@ -1113,7 +1102,7 @@ class Parser:
             e.ast = block
             raise
 
-        # Remaining whitespaces will not be catched since there are no more nodes
+        # Remaining whitespaces will not be caught since there are no more nodes
         for ws_token in self.current_ws:
             block.append_whitespaces(ws_token)
         self.current_ws = []

@@ -1,16 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2016-2021 The Meson development team
-
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import subprocess
 import re
@@ -28,8 +17,9 @@ import mesonbuild.coredata
 import mesonbuild.modules.gnome
 from mesonbuild.mesonlib import (
     MachineChoice, is_windows, is_cygwin, python_command, version_compare,
-    EnvironmentException, OptionKey
+    EnvironmentException
 )
+from mesonbuild.options import OptionKey
 from mesonbuild.compilers import (
     detect_c_compiler, detect_d_compiler, compiler_from_language,
 )
@@ -184,7 +174,7 @@ class WindowsTests(BasePlatformTests):
             # to the right reason).
             return
         self.build()
-    
+
     @skipIf(is_cygwin(), 'Test only applicable to Windows')
     def test_genvslite(self):
         # The test framework itself might be forcing a specific, non-ninja backend across a set of tests, which
@@ -225,7 +215,7 @@ class WindowsTests(BasePlatformTests):
         # Wrap the following bulk of setup and msbuild invocation testing in a try-finally because any exception,
         # failure, or success must always clean up any of the suffixed build dir folders that may have been generated.
         try:
-            # Since this 
+            # Since this
             self.init(testdir, extra_args=['--genvslite', 'vs2022'])
             # We need to bear in mind that the BasePlatformTests framework creates and cleans up its own temporary
             # build directory.  However, 'genvslite' creates a set of suffixed build directories which we'll have
@@ -261,9 +251,15 @@ class WindowsTests(BasePlatformTests):
                 env=current_env)
 
             # Check this has actually built the appropriate exes
-            output_debug = subprocess.check_output(str(os.path.join(self.builddir+'_debug', 'genvslite.exe')))
-            self.assertEqual( output_debug, b'Debug\r\n' )
-            output_release = subprocess.check_output(str(os.path.join(self.builddir+'_release', 'genvslite.exe')))
+            exe_path = str(os.path.join(self.builddir+'_debug', 'genvslite.exe'))
+            self.assertTrue(os.path.exists(exe_path))
+            rc = subprocess.run([exe_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.assertEqual(rc.returncode, 0, rc.stdout + rc.stderr)
+            output_debug = rc.stdout
+            self.assertEqual(output_debug, b'Debug\r\n' )
+            exe_path = str(os.path.join(self.builddir+'_release', 'genvslite.exe'))
+            self.assertTrue(os.path.exists(exe_path))
+            output_release = subprocess.check_output([exe_path])
             self.assertEqual( output_release, b'Non-debug\r\n' )
 
         finally:

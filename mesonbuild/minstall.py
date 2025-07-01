@@ -1,16 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2013-2014 The Meson development team
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
 
 from glob import glob
@@ -28,7 +18,8 @@ import re
 from . import build, environment
 from .backend.backends import InstallData
 from .mesonlib import (MesonException, Popen_safe, RealPathAction, is_windows,
-                       is_aix, setup_vsenv, pickle_load, is_osx, OptionKey)
+                       is_aix, setup_vsenv, pickle_load, is_osx)
+from .options import OptionKey
 from .scripts import depfixer, destdir_join
 from .scripts.meson_exe import run_exe
 try:
@@ -83,11 +74,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
                         help='Do not rebuild before installing.')
     parser.add_argument('--only-changed', default=False, action='store_true',
                         help='Only overwrite files that are older than the copied file.')
-    parser.add_argument('--quiet', default=False, action='store_true',
+    parser.add_argument('-q', '--quiet', default=False, action='store_true',
                         help='Do not print every file that was installed.')
     parser.add_argument('--destdir', default=None,
                         help='Sets or overrides DESTDIR environment. (Since 0.57.0)')
-    parser.add_argument('--dry-run', '-n', action='store_true',
+    parser.add_argument('-n', '--dry-run', action='store_true',
                         help='Doesn\'t actually install, but print logs. (Since 0.57.0)')
     parser.add_argument('--skip-subprojects', nargs='?', const='*', default='',
                         help='Do not install files from given subprojects. (Since 0.58.0)')
@@ -148,7 +139,6 @@ def append_to_log(lf: T.TextIO, line: str) -> None:
         lf.write('\n')
     lf.flush()
 
-
 def set_chown(path: str, user: T.Union[str, int, None] = None,
               group: T.Union[str, int, None] = None,
               dir_fd: T.Optional[int] = None, follow_symlinks: bool = True) -> None:
@@ -158,23 +148,42 @@ def set_chown(path: str, user: T.Union[str, int, None] = None,
     # be actually passed properly.
     # Not nice, but better than actually rewriting shutil.chown until
     # this python bug is fixed: https://bugs.python.org/issue18108
-    real_os_chown = os.chown
 
-    def chown(path: T.Union[int, str, 'os.PathLike[str]', bytes, 'os.PathLike[bytes]'],
-              uid: int, gid: int, *, dir_fd: T.Optional[int] = dir_fd,
-              follow_symlinks: bool = follow_symlinks) -> None:
-        """Override the default behavior of os.chown
+    # This is running into a problem where this may not match any of signatures
+    # of `shtil.chown`, which (simplified) are:
+    #  chown(path: int | AnyPath, user: int | str, group: None = None)
+    #  chown(path: int | AnyPath, user: None, group: int | str)
+    # We cannot through easy coercion of the type system force it to say:
+    #  - user is non null and group is null
+    #  - user is null and group is non null
+    #  - user is non null and group is non null
+    #
+    # This is checked by the only (current) caller, but let's be sure that the
+    # call we're making to `shutil.chown` is actually valid.
+    assert user is not None or group is not None, 'ensure that calls to chown are valid'
 
-        Use a real function rather than a lambda to help mypy out. Also real
-        functions are faster.
-        """
-        real_os_chown(path, uid, gid, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+    if sys.version_info >= (3, 13):
+        # pylint: disable=unexpected-keyword-arg
+        # cannot handle sys.version_info, https://github.com/pylint-dev/pylint/issues/9622
+        shutil.chown(path, user, group, dir_fd=dir_fd, follow_symlinks=follow_symlinks)  # type: ignore[call-overload]
+    else:
+        real_os_chown = os.chown
 
-    try:
-        os.chown = chown
-        shutil.chown(path, user, group)
-    finally:
-        os.chown = real_os_chown
+        def chown(path: T.Union[int, str, 'os.PathLike[str]', bytes, 'os.PathLike[bytes]'],
+                  uid: int, gid: int, *, dir_fd: T.Optional[int] = dir_fd,
+                  follow_symlinks: bool = follow_symlinks) -> None:
+            """Override the default behavior of os.chown
+
+            Use a real function rather than a lambda to help mypy out. Also real
+            functions are faster.
+            """
+            real_os_chown(path, uid, gid, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+        try:
+            os.chown = chown
+            shutil.chown(path, user, group)
+        finally:
+            os.chown = real_os_chown
 
 
 def set_chmod(path: str, mode: int, dir_fd: T.Optional[int] = None,
@@ -498,6 +507,9 @@ class Installer:
                 abs_src = os.path.join(root, d)
                 filepart = os.path.relpath(abs_src, start=src_dir)
                 abs_dst = os.path.join(dst_dir, filepart)
+                if os.path.islink(abs_src):
+                    files.append(d)
+                    continue
                 # Remove these so they aren't visited by os.walk at all.
                 if filepart in exclude_dirs:
                     dirs.remove(d)
@@ -567,7 +579,12 @@ class Installer:
             if is_windows() or destdir != '' or not os.isatty(sys.stdout.fileno()) or not os.isatty(sys.stderr.fileno()):
                 # can't elevate to root except in an interactive unix environment *and* when not doing a destdir install
                 raise
-            rootcmd = os.environ.get('MESON_ROOT_CMD') or shutil.which('sudo') or shutil.which('doas')
+            rootcmd = (
+                os.environ.get('MESON_ROOT_CMD')
+                or shutil.which('sudo')
+                or shutil.which('doas')
+                or shutil.which('run0')
+            )
             pkexec = shutil.which('pkexec')
             if rootcmd is None and pkexec is not None and 'PKEXEC_UID' not in os.environ:
                 rootcmd = pkexec
@@ -710,11 +727,11 @@ class Installer:
             try:
                 rc = self.run_exe(i, localenv)
             except OSError:
-                print(f'FAILED: install script \'{name}\' could not be run, stopped')
+                print(f'FAILED: install script \'{name}\' could not be run.')
                 # POSIX shells return 127 when a command could not be found
                 sys.exit(127)
             if rc != 0:
-                print(f'FAILED: install script \'{name}\' exit code {rc}, stopped')
+                print(f'FAILED: install script \'{name}\' failed with exit code {rc}.')
                 sys.exit(rc)
 
     def install_targets(self, d: InstallData, dm: DirMaker, destdir: str, fullprefix: str) -> None:
@@ -855,9 +872,9 @@ def run(opts: 'ArgumentType') -> int:
         sys.exit('Install data not found. Run this command in build directory root.')
     if not opts.no_rebuild:
         b = build.load(opts.wd)
-        need_vsenv = T.cast('bool', b.environment.coredata.get_option(OptionKey('vsenv')))
+        need_vsenv = T.cast('bool', b.environment.coredata.optstore.get_value_for(OptionKey('vsenv')))
         setup_vsenv(need_vsenv)
-        backend = T.cast('str', b.environment.coredata.get_option(OptionKey('backend')))
+        backend = T.cast('str', b.environment.coredata.optstore.get_value_for(OptionKey('backend')))
         if not rebuild_all(opts.wd, backend):
             sys.exit(-1)
     os.chdir(opts.wd)

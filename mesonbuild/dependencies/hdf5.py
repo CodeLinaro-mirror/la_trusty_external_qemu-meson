@@ -1,16 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2013-2019 The Meson development team
-
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 # This file contains the detection logic for miscellaneous external dependencies.
 from __future__ import annotations
@@ -133,13 +122,20 @@ class HDF5ConfigToolDependency(ConfigToolDependency):
         # and then without -c to get the link arguments.
         args = self.get_config_value(['-show', '-c'], 'args')[1:]
         args += self.get_config_value(['-show', '-noshlib' if self.static else '-shlib'], 'args')[1:]
+        found = False
         for arg in args:
             if arg.startswith(('-I', '-f', '-D')) or arg == '-pthread':
                 self.compile_args.append(arg)
             elif arg.startswith(('-L', '-l', '-Wl')):
                 self.link_args.append(arg)
+                found = True
             elif Path(arg).is_file():
                 self.link_args.append(arg)
+                found = True
+
+        # cmake h5cc is broken
+        if not found:
+            raise DependencyException('HDF5 was built with cmake instead of autotools, and h5cc is broken.')
 
     def _sanitize_version(self, ver: str) -> str:
         v = re.search(r'\s*HDF5 Version: (\d+\.\d+\.\d+)', ver)
@@ -157,10 +153,14 @@ def hdf5_factory(env: 'Environment', for_machine: 'MachineChoice',
         pkgconfig_files = OrderedSet(['hdf5', 'hdf5-serial'])
         pkg = PkgConfigInterface.instance(env, for_machine, silent=False)
         if pkg:
-            # some distros put hdf5-1.2.3.pc with version number in .pc filename.
-            for mod in pkg.list_all():
-                if mod.startswith('hdf5'):
-                    pkgconfig_files.add(mod)
+            try:
+                # old hdf5 versions put version number in .pc filename, e.g., hdf5-1.2.3.pc.
+                for mod in pkg.list_all():
+                    if mod.startswith('hdf5'):
+                        pkgconfig_files.add(mod)
+            except DependencyException:
+                # use just the standard files if pkg-config --list-all fails
+                pass
         for mod in pkgconfig_files:
             candidates.append(functools.partial(HDF5PkgConfigDependency, mod, env, kwargs, language))
 
