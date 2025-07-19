@@ -184,6 +184,8 @@ class BazelRuleLibrary:
     def apply_shims(self):
         rule_regex_to_shim = self._compile_shim_targets(self.shims.get("shims", []))
 
+        renames = {}
+
         for regex, shims in rule_regex_to_shim.items():
             for name, rule in self.library.items():
                 if regex.match(name):
@@ -223,6 +225,15 @@ class BazelRuleLibrary:
                             else:
                                 if self.DEBUG_LOG:
                                     mlog.debug(f"Replacement shim for: {shim_key}")
+                                if shim_key == "name":
+                                    renames[name] = f":{shim_value}"
+                                    renames[f":{name}"] = f":{shim_value}"
                                 self._apply_replacement_shims(
                                     rule, shim_key, shim_value
                                 )
+
+        # If we've renamed a rule then we should rename the dependency pointing
+        # to it from other rules.
+        for name, rule in self.library.items():
+            if "deps" in rule.params:
+                rule.params["deps"] = OrderedSet(d if d not in renames else renames[d] for d in rule.params["deps"])
