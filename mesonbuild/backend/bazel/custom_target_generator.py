@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import subprocess
 import typing as T
 from functools import lru_cache
@@ -45,7 +46,7 @@ def is_python_exe(prog):
 
 
 def is_resource_compiler(prog) -> bool:
-    if not "rc" in prog:
+    if "rc" not in prog:
         return False
 
     info = subprocess.check_output([prog, "-h"], encoding="utf-8")
@@ -55,8 +56,43 @@ def is_resource_compiler(prog) -> bool:
     )
 
 
-class CustomTargetGenerator:
+def get_bazel_target_from_script(file_path: str) -> T.Optional[str]:
+    """Checks if a file is a bazel wrapper script and returns the bazel target."""
+    try:
+        with open(file_path, "rb") as f:
+            # This prevents reading the entire file into memory if it's a large
+            # binary with no newline. 256 bytes is more than enough for
+            # a shebang or "@echo off" line.
+            first_line = f.readline(256).strip()
 
+            is_script = False
+            if platform.system() == "Windows":
+                if first_line == b"@echo off":
+                    is_script = True
+            else:
+                if first_line.startswith(b"#!/"):
+                    is_script = True
+
+            if not is_script:
+                return None
+
+            # Reset and read as text to find the marker
+            with open(file_path, "r", errors="ignore") as tf:
+                for _ in range(10):
+                    line = tf.readline()
+                    if not line:
+                        break
+                    # Note the marker will be either # Bazel:, or rem Bazel: on windows
+                    marker = " Bazel:"
+                    if marker in line:
+                        start_index = line.find(marker) + len(marker)
+                        return line[start_index:].strip()
+    except (IOError, OSError):
+        return None
+    return None
+
+
+class CustomTargetGenerator:
     DEBUG_LOG = False
 
     def __init__(self, library: BazelRuleLibrary, backend, resolver: PathResolver):
@@ -112,12 +148,18 @@ class CustomTargetGenerator:
 
         # file_deps contains all the file dependencies
         # We need to split them into python and data files
-        srcs = OrderedSet(sorted(
-            self.resolver.find(x).as_posix() for x in file_deps if x.endswith(".py")
-            ))
-        data = OrderedSet(sorted(
-            self.resolver.find(x).as_posix() for x in file_deps if not x.endswith(".py")
-            ))
+        srcs = OrderedSet(
+            sorted(
+                self.resolver.find(x).as_posix() for x in file_deps if x.endswith(".py")
+            )
+        )
+        data = OrderedSet(
+            sorted(
+                self.resolver.find(x).as_posix()
+                for x in file_deps
+                if not x.endswith(".py")
+            )
+        )
 
         return self.library.register(
             BazelRule(
@@ -226,7 +268,10 @@ class CustomTargetGenerator:
             for x in self.backend.get_custom_target_sources(target)
         ]
         srcs.update(inputs)
-        inputs = [f"$(location {s})" if os.path.isfile(s) else f"$(RULEDIR)/{s}" for s in inputs]
+        inputs = [
+            f"$(location {s})" if os.path.isfile(s) else f"$(RULEDIR)/{s}"
+            for s in inputs
+        ]
 
         if target.capture:
             cmds.append(f"> {outputs[0]}")
@@ -272,17 +317,28 @@ class CustomTargetGenerator:
                         f"Unsupported token ({i}) in custom command."
                     )
 
-                # Check to see if it is a path, if so we should make it relative
-                # and use location!
+                # So everything has to be completely self contained in a bazel build
+                # file. So if we are running custom-generator scripts we have basically
+                # 2 variants:
+                # - It is the invocation of find_program, with a set of parameters.
+                # .  - For this case we would have a bazel target we shimmed with a binary
+                # - It is something that was build during meson itself (python/binary etc)
+                # .  - We do not really know what this is..
                 if os.path.exists(i):
                     if os.path.isfile(i):
-                        if self.DEBUG_LOG:
-                            mlog.debug(f"     i-> str resolving: {i}")
-                        f = self.resolver.find(i)
-                        i = f"$(location {f.as_posix()})"
-                        srcs.add(f.as_posix())
+                        bazel_target = get_bazel_target_from_script(i)
+                        if bazel_target:
+                            i = f"$(location {bazel_target})"
+                            tools.append(bazel_target)
+                        else:
+                            if self.DEBUG_LOG:
+                                mlog.debug(f"     i-> str resolving: {i}")
+                            f = self.resolver.find(i)
+                            i = f"$(location {f.as_posix()})"
+                            srcs.add(f.as_posix())
                     else:
                         i = "$(RULEDIR)"
+
                 if self.DEBUG_LOG:
                     mlog.debug(f"     i-> str: {i}")
 
@@ -319,12 +375,13 @@ class CustomTargetGenerator:
 
 
 class GeneratedListGenerator(CustomTargetGenerator):
-
     def build_outputs(self, outputs: T.Set[str]):
         cmd = ["ninja", "-C", str(self.resolver.shadow_dir)]
         cmd += [output for output in outputs]
         try:
-            subprocess.check_call(cmd, )
+            subprocess.check_call(
+                cmd,
+            )
         except subprocess.SubprocessError as se:
             mlog.warning(f"Failed to generate {outputs} due to {se}")
 
@@ -343,7 +400,9 @@ class GeneratedListGenerator(CustomTargetGenerator):
                 "py_binary",
                 {
                     "name": prog,
-                    "srcs": OrderedSet([self.resolver.find(target.get_path()).as_posix()]),
+                    "srcs": OrderedSet(
+                        [self.resolver.find(target.get_path()).as_posix()]
+                    ),
                 },
             )
         )
