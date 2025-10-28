@@ -317,27 +317,51 @@ class CustomTargetGenerator:
                         f"Unsupported token ({i}) in custom command."
                     )
 
-                # So everything has to be completely self contained in a bazel build
-                # file. So if we are running custom-generator scripts we have basically
-                # 2 variants:
-                # - It is the invocation of find_program, with a set of parameters.
-                # .  - For this case we would have a bazel target we shimmed with a binary
-                # - It is something that was build during meson itself (python/binary etc)
-                # .  - We do not really know what this is..
+                # --- Resolving Custom Generator Paths for Bazel ---
+                #
+                # **The Constraint:** Bazel build files must be completely
+                # self-contained. All tools and sources used in a rule
+                # (like a custom generator) must be explicitly declared as
+                # dependencies.
+                #
+                # **The Task:** We must convert the generator's executable path (`i`)
+                # into a valid Bazel reference and add it to the correct
+                # dependency list (`tools` or `srcs`).
+                #
+                # We handle three cases for the path `i`:
                 if os.path.exists(i):
                     if os.path.isfile(i):
+                        # This is a file, which could be one of two things:
                         bazel_target = get_bazel_target_from_script(i)
                         if bazel_target:
+                            # CASE 1: It's a "known tool" (a Bazel wrapper script).
+                            # This script is a shim for a pre-defined Bazel target
+                            # (e.g., from `find_program`).
+                            #
+                            # Action: Reference it using its target label and add it
+                            # to the `tools` dependency list.
                             i = f"$(location {bazel_target})"
                             tools.append(bazel_target)
                         else:
+                            # CASE 2: It's an "unknown file" (e.g., a Python script,
+                            # a binary built by Meson, or a source file).
+                            # We treat this as a source file that the rule needs.
+                            #
+                            # Action: Resolve its full path, reference it as a
+                            # location, and add it to the `srcs` list.
                             if self.DEBUG_LOG:
                                 mlog.debug(f"     i-> str resolving: {i}")
                             f = self.resolver.find(i)
                             i = f"$(location {f.as_posix()})"
                             srcs.add(f.as_posix())
                     else:
+                        # CASE 3: It's a directory.
+                        # We assume this is a reference to the rule's output
+                        # directory, which is represented by $(RULEDIR) in Bazel.
                         i = "$(RULEDIR)"
+
+                # (Else: if os.path.exists(i) is false, `i` is likely a string literal
+                # or command that doesn't represent a file path, so we leave it as-is.)
 
                 if self.DEBUG_LOG:
                     mlog.debug(f"     i-> str: {i}")
@@ -355,7 +379,7 @@ class CustomTargetGenerator:
         if self.DEBUG_LOG:
             mlog.debug(f"     subst: {cmd}")
         cmd = substitute_values(cmd, values)
-        cmd = [i.replace("\\", "/") for i in cmd]
+        cmd = [i.replace("\\", "/").replace("'", "\\'") for i in cmd]
         if self.DEBUG_LOG:
             mlog.debug(f"     subst: {cmd}")
 
