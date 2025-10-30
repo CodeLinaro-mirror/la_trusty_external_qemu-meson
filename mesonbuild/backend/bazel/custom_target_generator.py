@@ -303,16 +303,23 @@ class CustomTargetGenerator:
                     mlog.debug(f"     i-> File: {i}")
 
             elif isinstance(i, str):
-                if any(
+                if "@DEPFILE@" in i:
+                    if target.depfile is None:
+                        raise MesonBugException(
+                            f'Custom target {cmds} has @DEPFILE@ but no depfile keyword argument.'
+                        )
+                    i = f"$(location {target.depfile})" if target.depfile else None
+                elif any(
                     token in i
                     for token in [
                         "@SOURCE_ROOT@",
                         "@BUILD_ROOT@",
                         "@CURRENT_SOURCE_DIR@",
-                        "@DEPFILE@",
                         "@PRIVATE_DIR@",
                     ]
                 ):
+                    # All tokens above need to be supported, because we don't know if it is a
+                    # required argument of a command.
                     raise MesonBugException(
                         f"Unsupported token ({i}) in custom command."
                     )
