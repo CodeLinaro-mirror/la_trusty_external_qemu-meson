@@ -368,11 +368,22 @@ class CustomTargetGenerator:
                             #
                             # Action: Resolve its full path, reference it as a
                             # location, and add it to the `srcs` list.
-                            if self.DEBUG_LOG:
-                                mlog.debug(f"     i-> str resolving: {i}")
-                            f = self.resolver.find(i)
-                            i = f"$(location {f.as_posix()})"
-                            srcs.add(f.as_posix())
+                            if i in self.backend.bin_path_to_bazel_target:
+                                # Check if the file is a known binary from our
+                                # pkg-config mapping.
+                                if self.DEBUG_LOG:
+                                    mlog.debug(f"Found known binary '{i}', "
+                                               f"using Bazel target: "
+                                               f"{self.backend.bin_path_to_bazel_target[i]}")
+                                bazel_target = self.backend.bin_path_to_bazel_target[i]
+                                i = f"$(location {bazel_target})"
+                                tools.append(bazel_target)
+                            else:
+                                if self.DEBUG_LOG:
+                                    mlog.debug(f"     i-> str resolving: {i}")
+                                f = self.resolver.find(i)
+                                i = f"$(location {f.as_posix()})"
+                                srcs.add(f.as_posix())
                     else:
                         # CASE 3: It's a directory.
                         # We assume this is a reference to the rule's output

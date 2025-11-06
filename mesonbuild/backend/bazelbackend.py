@@ -27,8 +27,8 @@ from functools import lru_cache
 from pathlib import Path
 
 from .. import build, dependencies, mlog
-from ..dependencies.pkgconfig import PkgConfigDependency
-from ..mesonlib import File, ProgressBar
+from ..dependencies.pkgconfig import PkgConfigDependency, PkgConfigInterface, PkgConfigCLI
+from ..mesonlib import File, ProgressBar, MachineChoice
 from .backends import Backend
 from .bazel.bazel_rules import BazelRuleLibrary, meson_target_as_bazel_label
 from .bazel.build_target_generator import BuildTargetGenerator
@@ -162,6 +162,48 @@ class BazelBackend(Backend):
         elif isinstance(target, build.Executable):
             self.build_target_generator.generate(target)
 
+    def _populate_bin_path_to_bazel_target_map(self):
+        """
+        Populates the `bin_path_to_bazel_target` dictionary by querying pkg-config for
+        'amc_bin_target' and 'amc_bazel_target' variables. This allows external
+        dependencies defined in pkg-config files to provide a mapping from a
+        binary path (e.g., a tool or executable) to a specific Bazel target label.
+        This is crucial for cases where a tool needed during the build is
+        provided by a different Bazel package/target than the pkg-config package
+        itself.
+
+        For example, a pkg-config file might define:
+          - amc_bin_target=/path/to/mytool
+          - amc_bazel_target=//my/bazel:tool_target
+
+        This method will then create a mapping {'/path/to/mytool': '//my/bazel:tool_target'},
+        which can be used by the backend to correctly reference the Bazel target
+        providing 'mytool' when generating build rules. This mechanism can be
+        surprising as it relies on custom variables within standard pkg-config
+        files, so it's important to document its purpose.
+        """
+        self.bin_path_to_bazel_target = {}
+        pkgconfig = PkgConfigInterface.instance(
+            self.environment, MachineChoice.HOST, silent=False
+        )
+        if pkgconfig:
+            all_packages = pkgconfig.list_all()
+            mlog.debug("Found pkg-config packages:", mlog.green(str(all_packages)))
+            for pkg in all_packages:
+                try:
+                    bin_target = pkgconfig.variable(
+                        pkg, "amc_bin_target", define_variable=None
+                    )
+                    bazel_target = pkgconfig.variable(
+                        pkg, "amc_bazel_target", define_variable=None
+                    )
+                    if bin_target and bazel_target:
+                        self.bin_path_to_bazel_target[bin_target] = bazel_target
+                except Exception:
+                    pass
+        else:
+            mlog.warning("pkg-config not found.")
+
     def initialize(self):
         shadow_dir = self.environment.coredata.optstore.get_value("backend_shadow_build")
         self.shims = self.load_shims()
@@ -180,6 +222,7 @@ class BazelBackend(Backend):
         )
         self.library = BazelRuleLibrary(self.shims)
         self.header_extractor = HeaderExtractor(shadow_dir, self.resolver)
+        self._populate_bin_path_to_bazel_target_map()
         self.custom_target_generator = CustomTargetGenerator(
             self.library, self, self.resolver
         )
