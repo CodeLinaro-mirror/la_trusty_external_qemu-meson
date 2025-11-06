@@ -130,6 +130,18 @@ class CustomTargetGenerator:
             prog = self.get_executable(target, cmds[0])
             py = cmds[0]
 
+        # For python custom_targets, it is typically defined as:
+        # my_py = custom_target(
+        #   'my_py.h',
+        #   input: 'my_py.py',
+        #   command: ['python', '@INPUT@', '@OUTPUT@'],
+        #   ...)
+        if "@INPUT@" in str(py):
+            inputs = [
+                self.resolver.resolve_from_build(Path(x)).as_posix()
+                for x in self.backend.get_custom_target_sources(target)
+            ]
+            py = inputs[0]
         if py not in target.depend_files:
             file_deps.append(self.resolver.find(py).as_posix())
 
