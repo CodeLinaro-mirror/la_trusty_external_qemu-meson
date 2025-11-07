@@ -101,25 +101,86 @@ class CustomTargetGenerator:
         self.resolver = resolver
 
     def get_executable(self, target: build.CustomTarget, program: [str | File]) -> str:
-        # It could be that we need to do input substitution
-        if program == "@INPUT@":
-            inputs = [
-                self.resolver.resolve_from_build(Path(x)).as_posix()
-                for x in self.backend.get_custom_target_sources(target)
-            ]
-            values = get_filenames_templates_dict(inputs, [])
-            prog = substitute_values([program], values)[0]
-            return Path(prog).with_suffix("").name
         if isinstance(program, File):
             program = program.relative_name()
         return Path(program).with_suffix("").name
 
-    def create_py_binary(self, target: build.CustomTarget):
+    def _substitute_cmd_args(self, cmds: T.List[str | File], target: build.CustomTarget) -> T.List[str | File]:
+        """Substitutes Meson-specific placeholders in a command list with Bazel-compatible paths.
+
+        This function resolves placeholders like `@INPUT@`, `@OUTPUT@`, and `@DEPFILE@`
+        to their actual paths, making them suitable for Bazel rules.
+
+        - `@INPUT@`, `@OUTPUT@`: Expands to a list of all input/output files, where each
+                                 file becomes a separate argument.
+        - `@INPUTn@`, `@OUTPUTn@`: Expands to the path of the n-th input/output file.
+        - `@DEPFILE@`: Expands to the path of the dependency file.
+
+        Args:
+            cmds: The original command list.
+            target: The Meson CustomTarget object.
+
+        Returns:
+            A new list of command arguments with all placeholders substituted.
+        """
+        # Resolve all input and output files to their Bazel-compatible POSIX paths.
+        inputs = [
+            self.resolver.resolve_from_build(Path(x)).as_posix()
+            for x in self.backend.get_custom_target_sources(target)
+        ]
+        outdir = Path(self.backend.get_custom_target_output_dir(target))
+        outputs = [os.path.join(outdir, i) for i in target.get_outputs()]
+
+        depfile = None
+        if target.depfile:
+            depfile = os.path.join(outdir, target.depfile)
+
+        # NOTE: Not all Meson placeholders are currently implemented. If new placeholders
+        # are introduced in Meson custom commands, they should be added to either
+        # the substitution logic above or the `unimplemented_tokens` list.
+        substituted_cmds = []
+        for cmd in cmds:
+            if isinstance(cmd, str):
+                # Check for unimplemented placeholders and raise an error if found.
+                unimplemented_tokens = [
+                    "@SOURCE_ROOT@",
+                    "@BUILD_ROOT@",
+                    "@CURRENT_SOURCE_DIR@",
+                    "@PRIVATE_DIR@",
+                    "@OUTDIR@",
+                    "@PLAINNAME@",
+                    "@BASENAME@",
+                ]
+                for token in unimplemented_tokens:
+                    if token in cmd:
+                        raise MesonBugException(
+                            f"Unsupported token ({token}) in custom command for target {target.name}."
+                        )
+
+                # Handle @INPUT@ and @OUTPUT@ placeholders, which expand to all files.
+                if cmd == "@INPUT@":
+                    substituted_cmds.extend(inputs)
+                    continue
+                if cmd == "@OUTPUT@":
+                    substituted_cmds.extend(outputs)
+                    continue
+
+                # Handle indexed @INPUTn@ and @OUTPUTn@ placeholders.
+                for i, val in enumerate(inputs):
+                    cmd = cmd.replace(f"@INPUT{i}@", val)
+                for i, val in enumerate(outputs):
+                    cmd = cmd.replace(f"@OUTPUT{i}@", val)
+
+                # Handle @DEPFILE@ placeholder.
+                if depfile and "@DEPFILE@" in cmd:
+                    cmd = cmd.replace("@DEPFILE@", depfile)
+
+            substituted_cmds.append(cmd)
+        return substituted_cmds
+
+    def create_py_binary(self, target: build.CustomTarget, cmds: T.List[str | File]):
         """Creates a py_binary rule if needed for this target."""
         file_deps: T.List[File] = []
-
-        # Make sure we don't accidentally override the existing cmds
-        cmds = target.command.copy()
 
         # Two cases, the custom command explicitly calls the
         # python interpreter, so the actual entrypoint is cmd[1]
@@ -130,18 +191,6 @@ class CustomTargetGenerator:
             prog = self.get_executable(target, cmds[0])
             py = cmds[0]
 
-        # For python custom_targets, it is typically defined as:
-        # my_py = custom_target(
-        #   'my_py.h',
-        #   input: 'my_py.py',
-        #   command: ['python', '@INPUT@', '@OUTPUT@'],
-        #   ...)
-        if "@INPUT@" in str(py):
-            inputs = [
-                self.resolver.resolve_from_build(Path(x)).as_posix()
-                for x in self.backend.get_custom_target_sources(target)
-            ]
-            py = inputs[0]
         if py not in target.depend_files:
             file_deps.append(self.resolver.find(py).as_posix())
 
@@ -221,7 +270,7 @@ class CustomTargetGenerator:
         # Check to see if this could be a py_binary:
         # -> the command starts with a python interpreter, 2nd is a .py file
         # -> the command starts with a .py file
-        cmds = target.command.copy()
+        cmds = self._substitute_cmd_args(target.command, target)
         srcs = set()
         tools = []
 
@@ -230,7 +279,7 @@ class CustomTargetGenerator:
             cmds[0] = f"$(location :{label})"
             tools = [f":{label}"]
         elif is_python_exe(cmds[0]):
-            rule = self.create_py_binary(target)
+            rule = self.create_py_binary(target, cmds)
             if not rule.is_valid():
                 mlog.warning(
                     f"Rule {rule.name} is invalid, not generating {target.name}"
@@ -246,7 +295,7 @@ class CustomTargetGenerator:
             # to the dependencies of the custom command.
             srcs.update(rule.params.get("data", []))
         elif Path(cmds[0]).suffix == ".py":
-            rule = self.create_py_binary(target)
+            rule = self.create_py_binary(target, cmds)
             if not rule.is_valid():
                 mlog.warning(
                     f"Rule {rule.name} is invalid, not generating {target.name}"
@@ -315,27 +364,6 @@ class CustomTargetGenerator:
                     mlog.debug(f"     i-> File: {i}")
 
             elif isinstance(i, str):
-                if "@DEPFILE@" in i:
-                    if target.depfile is None:
-                        raise MesonBugException(
-                            f'Custom target {cmds} has @DEPFILE@ but no depfile keyword argument.'
-                        )
-                    i = f"$(location {target.depfile})" if target.depfile else None
-                elif any(
-                    token in i
-                    for token in [
-                        "@SOURCE_ROOT@",
-                        "@BUILD_ROOT@",
-                        "@CURRENT_SOURCE_DIR@",
-                        "@PRIVATE_DIR@",
-                    ]
-                ):
-                    # All tokens above need to be supported, because we don't know if it is a
-                    # required argument of a command.
-                    raise MesonBugException(
-                        f"Unsupported token ({i}) in custom command."
-                    )
-
                 # --- Resolving Custom Generator Paths for Bazel ---
                 #
                 # **The Constraint:** Bazel build files must be completely
