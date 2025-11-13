@@ -23,11 +23,16 @@ import shutil
 import textwrap
 import time
 import typing as T
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
 
 from .. import build, dependencies, mlog
-from ..dependencies.pkgconfig import PkgConfigDependency, PkgConfigInterface, PkgConfigCLI
+from ..dependencies.pkgconfig import (
+    PkgConfigDependency,
+    PkgConfigInterface,
+    PkgConfigCLI,
+)
 from ..mesonlib import File, ProgressBar, MachineChoice
 from .backends import Backend
 from .bazel.bazel_rules import BazelRuleLibrary, meson_target_as_bazel_label
@@ -53,16 +58,13 @@ class BazelBackend(Backend):
         super().__init__(build, interpreter)
         self.build_dir = Path(self.environment.get_build_dir())
         self.source_dir = Path(self.environment.get_source_dir())
-        self.processed_targets = set()
         if self.build_dir.is_relative_to(self.source_dir):
             raise NotImplementedError(
                 "Please keep your build directory outside of source dir"
             )
 
     def load_shims(self):
-        shim_f = Path(
-            self.environment.coredata.optstore.get_value("backend_shim")
-        )
+        shim_f = Path(self.environment.coredata.optstore.get_value("backend_shim"))
         if shim_f.exists() and shim_f.is_file():
             with open(shim_f, "r") as shim_file:
                 json_str = "".join(
@@ -73,10 +75,7 @@ class BazelBackend(Backend):
         return {}
 
     def closure_rec(self, target, deps, exclude):
-        if (
-            target in deps
-            or isinstance(target, (str, File, build.GeneratedList))
-        ):
+        if target in deps or isinstance(target, (str, File, build.GeneratedList)):
             return deps
 
         if any(x.match(target.name) for x in exclude):
@@ -114,7 +113,13 @@ class BazelBackend(Backend):
         return deps
 
     def closure(self, target, exclude):
-        mlog.log("Getting dependency tree for (", type(target).__name__, ") ", target.name, ": ")
+        mlog.log(
+            "Getting dependency tree for (",
+            type(target).__name__,
+            ") ",
+            target.name,
+            ": ",
+        )
         deps = set()
         return self.closure_rec(target, deps, exclude)
 
@@ -143,12 +148,7 @@ class BazelBackend(Backend):
 
     @lru_cache(maxsize=None)
     def generate_target(self, target):
-        if target.get_id() in self.processed_targets:
-            mlog.debug(f"Target {target.get_id()} has already been processed.")
-            return
-
         mlog.log("--Generating ", type(target).__name__, ": ", target.name)
-        self.processed_targets.add(target.get_id())
         self.generate_generator_list_rules(target)
 
         if isinstance(target, build.CustomTarget):
@@ -205,7 +205,9 @@ class BazelBackend(Backend):
             mlog.warning("pkg-config not found.")
 
     def initialize(self):
-        shadow_dir = self.environment.coredata.optstore.get_value("backend_shadow_build")
+        shadow_dir = self.environment.coredata.optstore.get_value(
+            "backend_shadow_build"
+        )
         self.shims = self.load_shims()
         self.build_prefix = (
             Path("platform")
@@ -330,9 +332,9 @@ class BazelBackend(Backend):
             for c in closure:
                 if isinstance(c, build.StaticLibrary):
                     if c.name in library_sources:
-                            if set(c.sources) != library_sources[c.name]:
-                                mlog.log("sources disagree: ", c.name)
-                                clashes.add(c.name)
+                        if set(c.sources) != library_sources[c.name]:
+                            mlog.log("sources disagree: ", c.name)
+                            clashes.add(c.name)
                     else:
                         library_sources[c.name] = set(c.sources)
 
@@ -361,20 +363,23 @@ class BazelBackend(Backend):
         )
 
         leftover = []
-        # First do generator targets
-        mlog.log("Converting generator targets.")
+        generators = []
         for target in combined_targets:
             if not isinstance(
                 target, (build.StaticLibrary, build.SharedLibrary, build.Executable)
             ):
-                self.generate_target(target)
+                generators.append(target)
             else:
                 leftover.append(target)
 
-        mlog.log("Converting libraries.")
+        # Use a thread pool to generate targets concurrently
+        with ThreadPoolExecutor() as executor:
+            mlog.log("Converting generator targets.")
+            # Use list to ensure all futures complete before proceeding.
+            list(executor.map(self.generate_target, generators))
 
-        for target in leftover:
-            self.generate_target(target)
+            mlog.log("Converting libraries.")
+            list(executor.map(self.generate_target, leftover))
 
         self.library.apply_shims()
         self.write_results()

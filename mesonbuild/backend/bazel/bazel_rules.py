@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import re
+import threading
 import typing as T
 
 from ... import mlog
@@ -103,6 +104,7 @@ class BazelRuleLibrary:
     def __init__(self, shims: {}):
         self.library = {}
         self.shims = shims
+        self.lock = threading.Lock()
 
     def _apply_dep_shims(self, rule: BazelRule):
         ext_shims = self.shims.get("external_deps", {})
@@ -122,23 +124,27 @@ class BazelRuleLibrary:
         rule.params["deps"] = updated_deps
 
     def register(self, rule: BazelRule) -> BazelRule:
-        if self.DEBUG_LOG:
-            mlog.debug(f"Registering {rule.name} -> {rule}")
-        if rule.name in self.library:
-            raise ValueError(f"Rule {rule.name} has been registered already")
+        with self.lock:
+            if rule.name in self.library:
+                return self.library[rule.name]
 
-        self.library[rule.name] = rule
-        if "deps" in rule.params:
-            self._apply_dep_shims(rule)
-            self._fix_dep_prefix(rule)
+            if self.DEBUG_LOG:
+                mlog.debug(f"Registering {rule.name} -> {rule}")
 
-        return rule
+            self.library[rule.name] = rule
+            if "deps" in rule.params:
+                self._apply_dep_shims(rule)
+                self._fix_dep_prefix(rule)
+
+            return rule
 
     def get(self, name: str) -> BazelRule:
-        return self.library[as_bazel_label(name)]
+        with self.lock:
+            return self.library[as_bazel_label(name)]
 
     def is_registered(self, name: str) -> bool:
-        return as_bazel_label(name) in self.library
+        with self.lock:
+            return as_bazel_label(name) in self.library
 
     def serialize(self, stream):
         for target in sorted(self.library.values()):
@@ -236,4 +242,6 @@ class BazelRuleLibrary:
         # to it from other rules.
         for name, rule in self.library.items():
             if "deps" in rule.params:
-                rule.params["deps"] = OrderedSet(d if d not in renames else renames[d] for d in rule.params["deps"])
+                rule.params["deps"] = OrderedSet(
+                    d if d not in renames else renames[d] for d in rule.params["deps"]
+                )
