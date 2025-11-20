@@ -207,6 +207,9 @@ class BazelRuleLibrary:
                         if self.DEBUG_LOG:
                             mlog.debug(f"Shimming {rule.sort}(name = '{name}')")
 
+                        # For genrules we will try to update cmd if input labels are shimmed.
+                        input_replacements = {}
+
                         for shim_key, shim_value in shim_dict.items():
                             if shim_key == "restrict_to":
                                 continue
@@ -234,9 +237,31 @@ class BazelRuleLibrary:
                                 if shim_key == "name":
                                     renames[name] = f":{shim_value}"
                                     renames[f":{name}"] = f":{shim_value}"
+                                if shim_key == "srcs" and len(shim_value) == 1:
+                                    [new] = shim_value
+                                    for old in rule.params["srcs"]:
+                                        input_replacements[old] = new
+                                if shim_key == "tools" and len(shim_value) == 1:
+                                    [new] = shim_value
+                                    for old in rule.params["tools"]:
+                                        input_replacements[old] = new
+
                                 self._apply_replacement_shims(
                                     rule, shim_key, shim_value
                                 )
+
+                        # If srcs or tools were changed on a genrule then patch up the cmd if it wasn't already shimmed.
+                        if rule.sort == "genrule" and input_replacements and "cmd" not in shim_dict and "cmd_bat" not in shim_dict:
+                            if "cmd" in rule.params:
+                                cmd = rule.params["cmd"]
+                                for old, new in input_replacements.items():
+                                    cmd = cmd.replace(old, new)
+                                rule.params["cmd"] = cmd
+                            if "cmd_bat" in rule.params:
+                                cmd = rule.params["cmd_bat"]
+                                for old, new in input_replacements.items():
+                                    cmd = cmd.replace(old, new)
+                                rule.params["cmd_bat"] = cmd
 
         # If we've renamed a rule then we should rename the dependency pointing
         # to it from other rules.
