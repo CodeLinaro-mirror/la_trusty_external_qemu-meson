@@ -194,14 +194,14 @@ class CustomTargetGenerator:
         if self.DEBUG_LOG:
             mlog.debug(f"custom_target_command_as_bazel({target.name}) ")
 
-        srcs = set(
+        srcs = OrderedSet(sorted(
             self.resolver.find(x).as_posix()
             for x in self.backend.get_custom_target_sources(target)
-        )
+        ))
 
         outdir = Path(self.backend.get_custom_target_output_dir(target))
 
-        outs = set(Path.joinpath(outdir, i).as_posix() for i in target.get_outputs())
+        outs = OrderedSet(sorted(Path.joinpath(outdir, i).as_posix() for i in target.get_outputs()))
 
         # Next let's make sure these are generated in the shadow directory, so the build generator
         # can consume the generated sources
