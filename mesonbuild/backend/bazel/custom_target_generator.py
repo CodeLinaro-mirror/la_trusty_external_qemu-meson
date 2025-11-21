@@ -105,79 +105,6 @@ class CustomTargetGenerator:
             program = program.relative_name()
         return Path(program).with_suffix("").name
 
-    def _substitute_cmd_args(self, cmds: T.List[str | File], target: build.CustomTarget) -> T.List[str | File]:
-        """Substitutes Meson-specific placeholders in a command list with Bazel-compatible paths.
-
-        This function resolves placeholders like `@INPUT@`, `@OUTPUT@`, and `@DEPFILE@`
-        to their actual paths, making them suitable for Bazel rules.
-
-        - `@INPUT@`, `@OUTPUT@`: Expands to a list of all input/output files, where each
-                                 file becomes a separate argument.
-        - `@INPUTn@`, `@OUTPUTn@`: Expands to the path of the n-th input/output file.
-        - `@DEPFILE@`: Expands to the path of the dependency file.
-
-        Args:
-            cmds: The original command list.
-            target: The Meson CustomTarget object.
-
-        Returns:
-            A new list of command arguments with all placeholders substituted.
-        """
-        # Resolve all input and output files to their Bazel-compatible POSIX paths.
-        inputs = [
-            self.resolver.resolve_from_build(Path(x)).as_posix()
-            for x in self.backend.get_custom_target_sources(target)
-        ]
-        outdir = Path(self.backend.get_custom_target_output_dir(target))
-        outputs = [os.path.join(outdir, i) for i in target.get_outputs()]
-
-        depfile = None
-        if target.depfile:
-            depfile = os.path.join(outdir, target.depfile)
-
-        # NOTE: Not all Meson placeholders are currently implemented. If new placeholders
-        # are introduced in Meson custom commands, they should be added to either
-        # the substitution logic above or the `unimplemented_tokens` list.
-        substituted_cmds = []
-        for cmd in cmds:
-            if isinstance(cmd, str):
-                # Check for unimplemented placeholders and raise an error if found.
-                unimplemented_tokens = [
-                    "@SOURCE_ROOT@",
-                    "@BUILD_ROOT@",
-                    "@CURRENT_SOURCE_DIR@",
-                    "@PRIVATE_DIR@",
-                    "@OUTDIR@",
-                    "@PLAINNAME@",
-                    "@BASENAME@",
-                ]
-                for token in unimplemented_tokens:
-                    if token in cmd:
-                        raise MesonBugException(
-                            f"Unsupported token ({token}) in custom command for target {target.name}."
-                        )
-
-                # Handle @INPUT@ and @OUTPUT@ placeholders, which expand to all files.
-                if cmd == "@INPUT@":
-                    substituted_cmds.extend(inputs)
-                    continue
-                if cmd == "@OUTPUT@":
-                    substituted_cmds.extend(outputs)
-                    continue
-
-                # Handle indexed @INPUTn@ and @OUTPUTn@ placeholders.
-                for i, val in enumerate(inputs):
-                    cmd = cmd.replace(f"@INPUT{i}@", val)
-                for i, val in enumerate(outputs):
-                    cmd = cmd.replace(f"@OUTPUT{i}@", val)
-
-                # Handle @DEPFILE@ placeholder.
-                if depfile and "@DEPFILE@" in cmd:
-                    cmd = cmd.replace("@DEPFILE@", depfile)
-
-            substituted_cmds.append(cmd)
-        return substituted_cmds
-
     def create_py_binary(self, target: build.CustomTarget, cmds: T.List[str | File]):
         """Creates a py_binary rule if needed for this target."""
         file_deps: T.List[File] = []
@@ -267,13 +194,48 @@ class CustomTargetGenerator:
         if self.DEBUG_LOG:
             mlog.debug(f"custom_target_command_as_bazel({target.name}) ")
 
+        srcs = set(
+            self.resolver.find(x).as_posix()
+            for x in self.backend.get_custom_target_sources(target)
+        )
+
+        outdir = Path(self.backend.get_custom_target_output_dir(target))
+
+        outs = set(Path.joinpath(outdir, i).as_posix() for i in target.get_outputs())
+
+        # Next let's make sure these are generated in the shadow directory, so the build generator
+        # can consume the generated sources
+        self.build_outputs(outs)
+
+        cmd_inputs = [
+            f"$(location {s})" if os.path.isfile(s) else f"$(RULEDIR)/{s}"
+            for s in srcs
+        ]
+        cmd_outputs = [f"$(location {i})" for i in outs]
+        # Substitute the rest of the template strings
+        templates_dict = get_filenames_templates_dict(cmd_inputs, cmd_outputs)
+        if target.depfile:
+            templates_dict["@DEPFILE@"] = f"$(location {Path.joinpath(outdir, target.depfile).as_posix()})"
+
+        cmds = substitute_values(target.command, templates_dict)
+        if self.DEBUG_LOG:
+            mlog.debug(f"     values: {templates_dict}")
+        if self.DEBUG_LOG:
+            mlog.debug(f"     subst: {cmds}")
+
+        if target.capture:
+            cmds.append(f"> {cmd_outputs[0]}")
+
+        if self.DEBUG_LOG:
+            mlog.debug(f"     cmd_outputs: {cmd_outputs}")
+        if self.DEBUG_LOG:
+            mlog.debug(f"     cmd_inputs:  {cmd_inputs}")
+
+        tools = []
+
         # Check to see if this could be a py_binary:
         # -> the command starts with a python interpreter, 2nd is a .py file
         # -> the command starts with a .py file
-        cmds = self._substitute_cmd_args(target.command, target)
-        srcs = set()
-        tools = []
-
         if isinstance(cmds[0], build.Executable):
             label = as_bazel_label(cmds[0].name)
             cmds[0] = f"$(location :{label})"
@@ -316,32 +278,6 @@ class CustomTargetGenerator:
                 f"Genrule {cmds} {type(cmds[0])} for {target.name}: not supported, ignoring"
             )
             return
-
-        outdir = Path(self.backend.get_custom_target_output_dir(target))
-        outs = set([Path.joinpath(outdir, i).as_posix() for i in target.get_outputs()])
-        # Next let's make sure these are generated in the shadow directory, so the build generator
-        # can consume the generated sources
-        self.build_outputs(outs)
-
-        outputs = [f"$(location {i})" for i in outs]
-        inputs = [
-            self.resolver.find(x).as_posix()
-            for x in self.backend.get_custom_target_sources(target)
-        ]
-        srcs.update(inputs)
-        inputs = [
-            f"$(location {s})" if os.path.isfile(s) else f"$(RULEDIR)/{s}"
-            for s in inputs
-        ]
-
-        if target.capture:
-            cmds.append(f"> {outputs[0]}")
-
-        # Evaluate the command list
-        if self.DEBUG_LOG:
-            mlog.debug(f"     outputs: {outputs}")
-        if self.DEBUG_LOG:
-            mlog.debug(f"     inputs:  {inputs}")
 
         cmd: T.List[str] = []
         for i in cmds:
@@ -430,13 +366,6 @@ class CustomTargetGenerator:
                 i = '""'
             cmd.append(i)
 
-        # Substitute the rest of the template strings
-        values = get_filenames_templates_dict(inputs, outputs)
-        if self.DEBUG_LOG:
-            mlog.debug(f"     values: {values}")
-        if self.DEBUG_LOG:
-            mlog.debug(f"     subst: {cmd}")
-        cmd = substitute_values(cmd, values)
         cmd = [i.replace("\\", "/").replace("'", "\\'") for i in cmd]
         if self.DEBUG_LOG:
             mlog.debug(f"     subst: {cmd}")
