@@ -231,6 +231,28 @@ class BazelRuleLibrary:
                                     mlog.debug(f"Adding shim for: {param}")
                                 self._apply_addition_shims(rule, param, shim_value)
 
+                            elif shim_key == "substitutions":
+                                for item in shim_value:
+                                    attr = item["attribute"]
+                                    pattern = item["pattern"]
+                                    repl = item["repl"]
+                                    if attr == "name":
+                                        raise ValueError(
+                                            "The attribute 'name' in a substitution is reserved, and cannot be changed.'"
+                                        )
+                                    if attr not in rule.params:
+                                        raise ValueError(
+                                            f"Substitution of non-existent attribute: {attr} in {rule}"
+                                        )
+                                    if not isinstance(rule.params[attr], str):
+                                        raise ValueError(
+                                            f"Substitution of non-string attribute: {attr} in {rule}"
+                                        )
+
+                                    rule.params[attr] = re.sub(
+                                        pattern, repl, rule.params[attr]
+                                    )
+
                             else:
                                 if self.DEBUG_LOG:
                                     mlog.debug(f"Replacement shim for: {shim_key}")
@@ -251,7 +273,12 @@ class BazelRuleLibrary:
                                 )
 
                         # If srcs or tools were changed on a genrule then patch up the cmd if it wasn't already shimmed.
-                        if rule.sort == "genrule" and input_replacements and "cmd" not in shim_dict and "cmd_bat" not in shim_dict:
+                        if (
+                            rule.sort == "genrule"
+                            and input_replacements
+                            and "cmd" not in shim_dict
+                            and "cmd_bat" not in shim_dict
+                        ):
                             if "cmd" in rule.params:
                                 cmd = rule.params["cmd"]
                                 for old, new in input_replacements.items():
