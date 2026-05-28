@@ -290,7 +290,7 @@ class BuildTargetGenerator:
                     "deps": OrderedSet(sorted(objc_data.deps)),
                     # TODO: Figure out what to do with these
                     # "copts": OrderedSet(objc_data.warnings).union(objc_data.fopts),
-                    "defines": OrderedSet(sorted(objc_data.defines)),
+                    "local_defines": OrderedSet(sorted(objc_data.defines)),
                     "linkopts": OrderedSet(sorted(objc_data.linkopts)),
                     "alwayslink": hasattr(target, "alwayslink") and target.alwayslink,
                     "includes": OrderedSet(objc_data.includes),
@@ -311,7 +311,7 @@ class BuildTargetGenerator:
                     # "copts": OrderedSet(cc_data.warnings).union(cc_data.fopts),
                     "linkopts": OrderedSet(sorted(cc_data.linkopts)),
                     "deps": OrderedSet(sorted(cc_data.deps)),
-                    "defines": OrderedSet(sorted(cc_data.defines)),
+                    "local_defines": OrderedSet(sorted(cc_data.defines)),
                     "includes": OrderedSet(cc_data.includes),
                 },
             )
@@ -331,7 +331,7 @@ class BuildTargetGenerator:
                     # "copts": OrderedSet(cc_data.warnings).union(cc_data.fopts),
                     "linkopts": OrderedSet(sorted(cc_data.linkopts)),
                     "deps": OrderedSet(sorted(cc_data.deps)),
-                    "defines": OrderedSet(sorted(cc_data.defines)),
+                    "local_defines": OrderedSet(sorted(cc_data.defines)),
                     "includes": OrderedSet(cc_data.includes),
                 },
             )
@@ -352,7 +352,7 @@ class BuildTargetGenerator:
                     "deps": OrderedSet(sorted(cc_data.deps)),
                     # "copts": OrderedSet(cc_data.warnings).union(cc_data.fopts),
                     "linkopts": OrderedSet(sorted(cc_data.linkopts)),
-                    "defines": OrderedSet(sorted(cc_data.defines)),
+                    "local_defines": OrderedSet(sorted(cc_data.defines)),
                     "includes": OrderedSet(cc_data.includes),
                 },
             )
