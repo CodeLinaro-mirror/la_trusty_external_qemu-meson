@@ -282,6 +282,90 @@ class HeaderExtractor:
                 f"Failed to extract headers with {' '.join(cmd)} in {self.shadow_build_dir}, which is part of {target}"
             )
 
+    def adjust_include_args(self, args: T.List[str]) -> T.List[str]:
+        """Adjusts include path arguments for compiler invocation.
+
+        When extracting headers, the compiler is executed in the shadow build
+        directory, but the compiler arguments were generated relative to the
+        Bazel build directory.
+
+        This method intercepts include flags (-I, -isystem, -iquote) and adjusts
+        their paths:
+        1. If the path is relative and points inside the Bazel build tree, it
+           is mapped to the corresponding path in the shadow build tree (where
+           generated headers exist).
+        2. If the path is relative and points outside the build tree (e.g., to
+           the source tree), it is resolved to an absolute path so it remains
+           valid regardless of the compiler's working directory.
+
+        Args:
+            args: The original compiler arguments.
+
+        Returns:
+            The adjusted compiler arguments.
+        """
+        new_args = []
+        i = 0
+        while i < len(args):
+            arg = args[i]
+
+            # Handle separate arguments: -I path, -isystem path, -iquote path
+            if arg in ("-I", "-isystem", "-iquote"):
+                if i + 1 < len(args):
+                    path_str = args[i+1]
+                    adjusted_path = self._adjust_path(path_str)
+                    new_args.append(arg)
+                    new_args.append(adjusted_path)
+                    i += 2
+                    continue
+                else:
+                    new_args.append(arg)
+                    i += 1
+                    continue
+
+            # Handle joined arguments: -Ipath
+            if arg.startswith("-I") and len(arg) > 2:
+                path_str = arg[2:]
+                adjusted_path = self._adjust_path(path_str)
+                new_args.append("-I" + adjusted_path)
+                i += 1
+                continue
+
+            # Handle joined arguments: -isystempath (unlikely but possible)
+            if arg.startswith("-isystem") and len(arg) > 8:
+                path_str = arg[8:]
+                adjusted_path = self._adjust_path(path_str)
+                new_args.append("-isystem" + adjusted_path)
+                i += 1
+                continue
+
+            # Handle joined arguments: -iquotepath (unlikely but possible)
+            if arg.startswith("-iquote") and len(arg) > 7:
+                path_str = arg[7:]
+                adjusted_path = self._adjust_path(path_str)
+                new_args.append("-iquote" + adjusted_path)
+                i += 1
+                continue
+
+            new_args.append(arg)
+            i += 1
+
+        return new_args
+
+    def _adjust_path(self, path_str: str) -> str:
+        """Helper to resolve and map a single path string."""
+        path = Path(path_str)
+        if not path.is_absolute():
+            # Resolve relative to build_dir
+            abs_path = (self.build_dir / path).resolve()
+            if abs_path.is_relative_to(self.build_dir):
+                relative = abs_path.relative_to(self.build_dir)
+                new_path = self.shadow_build_dir / relative
+                return new_path.as_posix()
+            else:
+                return abs_path.as_posix()
+        return path_str
+
     async def extract_headers_from_compiler_output_async(
         self,
         target: build.BuildTarget,
@@ -294,10 +378,11 @@ class HeaderExtractor:
         (Asynchronous version using asyncio)
         """
 
-        args.append("-M")
+        adjusted_args = self.adjust_include_args(args)
+        adjusted_args.append("-M")
         cmd = (
             cc.get_exelist()
-            + [x for x in args]
+            + adjusted_args
             + [
                 srcfile.absolute_path(
                     self.resolver.source_dir,
@@ -361,10 +446,11 @@ class HeaderExtractor:
                 cannot be parsed.
         """
 
-        args.append("-M")
+        adjusted_args = self.adjust_include_args(args)
+        adjusted_args.append("-M")
         cmd = (
             cc.get_exelist()
-            + [x for x in args]
+            + adjusted_args
             + [
                 srcfile.absolute_path(
                     self.resolver.source_dir,
@@ -383,12 +469,14 @@ class HeaderExtractor:
                 cmd,
                 cwd=self.shadow_build_dir,
                 encoding="utf-8",
+                stderr=subprocess.PIPE,
             )
             return self._extract_bazel_headers_from_dep(out.splitlines(), sys_headers)
 
-        except subprocess.CalledProcessError:
+        except subprocess.CalledProcessError as e:
             raise MesonBugException(
-                f"Failed to extract headers with {' '.join(cmd)} in {self.shadow_build_dir}, which is part of {target}"
+                f"Failed to extract headers with {' '.join(cmd)} in {self.shadow_build_dir}, which is part of {target}\n"
+                + f"Error output:\n{e.stderr}" if self.DEBUG_LOG else ""
             )
 
     def build_external_dependency_map(self, targets: T.List[build.Target]):

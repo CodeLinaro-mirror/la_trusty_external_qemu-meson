@@ -215,7 +215,7 @@ class PathResolver:
 
             if resolved.is_relative_to(self.build_dir):
                 if self.DEBUG_LOG: mlog.debug(f"!! {resolved}.is_relative_to({self.build_dir}) (self.build_dir):")
-                relative = resolved.relative_to(self.shadow_dir)
+                relative = resolved.relative_to(self.build_dir)
                 return self.build_prefix / relative
 
             # okay, you do not exist in source or shadow. not good!
@@ -232,6 +232,14 @@ class PathResolver:
                 # Simplify the path..
                 return simplified.relative_to(self.source_dir)
 
+
+        # Or maybe the build dir:
+        if Path.joinpath(self.build_dir, p).exists():
+            simplified = self.resolve_symlink_path(Path.joinpath(self.build_dir, p))
+            if simplified.is_relative_to(self.source_dir):
+                if self.DEBUG_LOG: mlog.debug(f"!! relative path to build {simplified.relative_to(self.source_dir)}")
+                # Simplify the path..
+                return simplified.relative_to(self.source_dir)
 
         # Let's resolve it from the build dir and see where we end up
         resolved_from_shadow = self.resolve_symlink_path(
