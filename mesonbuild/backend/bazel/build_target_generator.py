@@ -290,7 +290,9 @@ class BuildTargetGenerator:
                     "deps": OrderedSet(sorted(objc_data.deps)),
                     # TODO: Figure out what to do with these
                     # "copts": OrderedSet(objc_data.warnings).union(objc_data.fopts),
-                    "local_defines": OrderedSet(sorted(objc_data.defines)),
+                    # TODO: the docs say it should have local_defines but it
+                    # doesn't!
+                    "defines": OrderedSet(sorted(objc_data.defines)),
                     "linkopts": OrderedSet(sorted(objc_data.linkopts)),
                     "alwayslink": hasattr(target, "alwayslink") and target.alwayslink,
                     "includes": OrderedSet(objc_data.includes),
