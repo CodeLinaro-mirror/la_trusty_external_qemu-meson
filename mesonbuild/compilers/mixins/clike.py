@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import copy
+import time
 import typing as T
 from pathlib import Path
 
@@ -292,6 +293,17 @@ class CLikeCompiler(Compiler):
         binname += '.exe'
         # Write binary check source
         binary_name = os.path.join(work_dir, binname)
+        if mesonlib.is_windows():
+            # On Windows, file operations can sometimes fail due to locking.
+            # We retry unlinking the file a few times with a small delay.
+            for attempt in range(5):
+                try:
+                    if os.path.exists(binary_name):
+                        os.unlink(binary_name)
+                    break
+                except OSError as e:
+                    mlog.debug(f'Failed to unlink {binary_name} on attempt {attempt+1} due to {e}. Retrying after 0.2s...')
+                    time.sleep(0.2)
         with open(source_name, 'w', encoding='utf-8') as ofile:
             ofile.write(code)
         # Compile sanity check
