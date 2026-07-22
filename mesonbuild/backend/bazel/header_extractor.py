@@ -476,7 +476,8 @@ class HeaderExtractor:
         except subprocess.CalledProcessError as e:
             raise MesonBugException(
                 f"Failed to extract headers with {' '.join(cmd)} in {self.shadow_build_dir}, which is part of {target}\n"
-                + f"Error output:\n{e.stderr}" if self.DEBUG_LOG else ""
+                f"Error output:\n{e.stderr}\n"
+                f"Stdout:\n{e.stdout}"
             )
 
     def build_external_dependency_map(self, targets: T.List[build.Target]):

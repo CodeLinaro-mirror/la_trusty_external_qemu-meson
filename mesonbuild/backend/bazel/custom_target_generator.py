@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import platform
 import subprocess
+import time
 import typing as T
 from functools import lru_cache
 from pathlib import Path
@@ -180,12 +181,20 @@ class CustomTargetGenerator:
         )
 
     def build_outputs(self, outputs: T.Set[str]):
-        cmd = ["ninja", "-C", str(self.resolver.shadow_dir)]
+        ninja_bin = os.environ.get("NINJA", "ninja")
+        cmd = [ninja_bin, "-C", str(self.resolver.shadow_dir)]
         cmd += [output for output in outputs]
-        try:
-            subprocess.check_call(cmd)
-        except subprocess.SubprocessError as se:
-            mlog.warning(f"Failed to generate {outputs} due to {se}")
+        max_retries = 5
+        for attempt in range(1, max_retries + 1):
+            try:
+                subprocess.check_call(cmd)
+                return
+            except subprocess.SubprocessError as se:
+                if attempt == max_retries:
+                    mlog.warning(f"Failed to generate {outputs} after {max_retries} attempts due to {se}")
+                else:
+                    mlog.warning(f"Failed to generate {outputs} (attempt {attempt}/{max_retries}) due to {se}. Retrying...")
+                    time.sleep(0.5)
 
     def generate(self, target: build.CustomTarget) -> BazelRule:
         if self.library.is_registered(target.name):
@@ -386,15 +395,6 @@ class CustomTargetGenerator:
 
 
 class GeneratedListGenerator(CustomTargetGenerator):
-    def build_outputs(self, outputs: T.Set[str]):
-        cmd = ["ninja", "-C", str(self.resolver.shadow_dir)]
-        cmd += [output for output in outputs]
-        try:
-            subprocess.check_call(
-                cmd,
-            )
-        except subprocess.SubprocessError as se:
-            mlog.warning(f"Failed to generate {outputs} due to {se}")
 
     def create_py_binary(self, target: programs.ExternalProgram):
         """Creates a py_binary rule if needed for this target."""
