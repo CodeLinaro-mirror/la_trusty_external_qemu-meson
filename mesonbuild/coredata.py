@@ -280,6 +280,26 @@ class CoreData:
         self.compiler_check_cache: T.Dict['CompilerCheckCacheKey', 'CompileResult'] = OrderedDict()
         self.run_check_cache: T.Dict['RunCheckCacheKey', 'RunResult'] = OrderedDict()
 
+        shadow_dir = None
+        for arg in sys.argv:
+            if arg.startswith("-Dbackend_shadow_build="):
+                shadow_dir = arg.split("=", 1)[1].strip()
+        if not shadow_dir:
+            shadow_dir = os.environ.get("MESON_SHADOW_BUILD")
+        if shadow_dir:
+            from pathlib import Path
+            coredata_file = Path(shadow_dir) / "meson-private" / "coredata.dat"
+            if coredata_file.exists():
+                try:
+                    with open(coredata_file, "rb") as f:
+                        prev_coredata = pickle.load(f)
+                    if hasattr(prev_coredata, "compiler_check_cache"):
+                        self.compiler_check_cache.update(prev_coredata.compiler_check_cache)
+                    if hasattr(prev_coredata, "run_check_cache"):
+                        self.run_check_cache.update(prev_coredata.run_check_cache)
+                except Exception as e:
+                    mlog.warning(f"Could not load shadow coredata cache: {e}")
+
         # CMake cache
         self.cmake_cache: PerMachine[CMakeStateCache] = PerMachine(CMakeStateCache(), CMakeStateCache())
 

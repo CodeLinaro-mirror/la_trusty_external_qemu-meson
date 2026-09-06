@@ -404,19 +404,21 @@ class HeaderExtractor:
             stdout, stderr = await proc.communicate()
 
             if proc.returncode != 0:
-                raise MesonBugException(
+                mlog.warning(
                     f"Failed to extract headers with {' '.join(cmd)} in {self.shadow_build_dir}, which is part of {target}\n"
                     f"Error output:\n{stderr.decode()}"
                 )
+                return []
 
             return self._extract_bazel_headers_from_dep(
                 stdout.decode("utf-8").splitlines(), sys_headers
             )
 
-        except Exception as e:  # Catch a broader range of exceptions
-            raise MesonBugException(
+        except Exception as e:
+            mlog.warning(
                 f"Error during header extraction with {' '.join(cmd)} in {self.shadow_build_dir}: {e}"
             )
+            return []
 
     def extract_headers_from_compiler_output(
         self,
@@ -474,11 +476,12 @@ class HeaderExtractor:
             return self._extract_bazel_headers_from_dep(out.splitlines(), sys_headers)
 
         except subprocess.CalledProcessError as e:
-            raise MesonBugException(
+            mlog.warning(
                 f"Failed to extract headers with {' '.join(cmd)} in {self.shadow_build_dir}, which is part of {target}\n"
                 f"Error output:\n{e.stderr}\n"
                 f"Stdout:\n{e.stdout}"
             )
+            return []
 
     def build_external_dependency_map(self, targets: T.List[build.Target]):
         """Constructs a mapping between external include directories and their dependencies.

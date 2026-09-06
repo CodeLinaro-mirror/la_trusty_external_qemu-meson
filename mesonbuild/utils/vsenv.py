@@ -53,6 +53,8 @@ def _setup_vsenv(force: bool) -> bool:
             return False
 
     root = os.environ.get("ProgramFiles(x86)") or os.environ.get("ProgramFiles")
+    if not root:
+        return False
     bat_locator_bin = pathlib.Path(root, 'Microsoft Visual Studio/Installer/vswhere.exe')
     if not bat_locator_bin.exists():
         raise MesonException(f'Could not find {bat_locator_bin}')
@@ -119,7 +121,7 @@ def _setup_vsenv(force: bool) -> bool:
 def setup_vsenv(force: bool = False) -> bool:
     try:
         return _setup_vsenv(force)
-    except MesonException as e:
+    except Exception as e:
         if force:
             raise
         mlog.warning('Failed to activate VS environment:', str(e))

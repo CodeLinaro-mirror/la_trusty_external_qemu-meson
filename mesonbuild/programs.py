@@ -188,8 +188,14 @@ class ExternalProgram(mesonlib.HoldableObject):
         the interpreter to use. This is useful if the script is not executable
         or if we're on Windows (which does not understand shebangs).
         """
+        if not script or script.lower().endswith(('.exe', '.com', '.dll', '.bin', '.lib', '.a')):
+            return None
         try:
-            with open(script, encoding='utf-8') as f:
+            with open(script, 'rb') as f:
+                header = f.read(2)
+                if header in (b'MZ', b'\x7fE'):
+                    return None
+            with open(script, encoding='utf-8', errors='ignore') as f:
                 first_line = f.readline().strip()
             if first_line.startswith('#!'):
                 # In a shebang, everything before the first space is assumed to
@@ -205,7 +211,7 @@ class ExternalProgram(mesonlib.HoldableObject):
                     if len(commands) > 0 and commands[0] == 'env':
                         commands = commands[1:]
                     # Windows does not ship python3.exe, but we know the path to it
-                    if len(commands) > 0 and commands[0] == 'python3':
+                    if len(commands) > 0 and commands[0] in ('python3', 'python', 'python3.exe', 'python.exe'):
                         commands = mesonlib.python_command + commands[1:]
                 elif mesonlib.is_haiku():
                     # Haiku does not have /usr, but a lot of scripts assume that
