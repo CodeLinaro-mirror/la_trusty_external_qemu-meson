@@ -475,6 +475,11 @@ class BinaryTable:
             return None
         elif not command[0].strip():
             return None
+        if mesonlib.is_windows() and len(command) > 0:
+            from .programs import ExternalProgram
+            shebang_cmd = ExternalProgram._shebang_to_cmd(command[0])
+            if shebang_cmd:
+                return shebang_cmd + command[1:]
         return command
 
 class CMakeVariables:

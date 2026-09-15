@@ -47,14 +47,21 @@ def is_python_exe(prog):
 
 
 def is_resource_compiler(prog) -> bool:
-    if "rc" not in prog:
+    if isinstance(prog, (Path, str)):
+        stem = Path(str(prog)).stem.lower()
+        if stem in ["windres", "rc", "llvm-rc", "windmc", "llvm-windres"]:
+            return True
+        if "windres" in stem or "llvm-rc" in stem:
+            return True
+    try:
+        info = subprocess.check_output([str(prog), "-h"], encoding="utf-8")
+        return (
+            "Microsoft (R) Windows (R) Resource Compiler" in info
+            or "LLVM Resource Converter" in info
+            or "llvm-windres" in info
+        )
+    except Exception:
         return False
-
-    info = subprocess.check_output([prog, "-h"], encoding="utf-8")
-    return (
-        "Microsoft (R) Windows (R) Resource Compiler" in info
-        or "LLVM Resource Converter" in info
-    )
 
 
 def get_bazel_target_from_script(file_path: str) -> T.Optional[str]:
@@ -104,6 +111,10 @@ class CustomTargetGenerator:
     def get_executable(self, target: build.CustomTarget, program: [str | File]) -> str:
         if isinstance(program, File):
             program = program.relative_name()
+        elif isinstance(program, str) and program.startswith("$(location ") and program.endswith(")"):
+            # Tools declared in build-config.jsonc ("binaries") are emitted as
+            # '$(location <bazel_target>)'. Strip the wrapper to extract the clean target name.
+            program = program[len("$(location "):-1]
         return Path(program).with_suffix("").name
 
     def create_py_binary(self, target: build.CustomTarget, cmds: T.List[str | File]):
@@ -119,8 +130,15 @@ class CustomTargetGenerator:
             prog = self.get_executable(target, cmds[0])
             py = cmds[0]
 
+        if isinstance(py, str) and py.startswith("$(location ") and py.endswith(")"):
+            # Strip '$(location ...)' before resolving file dependencies on disk.
+            py = py[len("$(location "):-1]
+
         if py not in target.depend_files:
-            file_deps.append(self.resolver.find(py).as_posix())
+            try:
+                file_deps.append(self.resolver.find(py).as_posix())
+            except Exception:
+                pass
 
         # Binary has been created already.
         if self.library.is_registered(prog):
@@ -137,18 +155,23 @@ class CustomTargetGenerator:
 
         # file_deps contains all the file dependencies
         # We need to split them into python and data files
-        srcs = OrderedSet(
-            sorted(
-                self.resolver.find(x).as_posix() for x in file_deps if x.endswith(".py")
-            )
-        )
-        data = OrderedSet(
-            sorted(
-                self.resolver.find(x).as_posix()
-                for x in file_deps
-                if not x.endswith(".py")
-            )
-        )
+        resolved_srcs = []
+        for x in file_deps:
+            if x.endswith(".py"):
+                try:
+                    resolved_srcs.append(self.resolver.find(x).as_posix())
+                except Exception:
+                    pass
+        srcs = OrderedSet(sorted(resolved_srcs))
+
+        resolved_data = []
+        for x in file_deps:
+            if not x.endswith(".py"):
+                try:
+                    resolved_data.append(self.resolver.find(x).as_posix())
+                except Exception:
+                    pass
+        data = OrderedSet(sorted(resolved_data))
 
         return self.library.register(
             BazelRule(
@@ -242,6 +265,9 @@ class CustomTargetGenerator:
 
         tools = []
 
+        if is_resource_compiler(cmds[0]) or (len(cmds) > 1 and is_python_exe(cmds[0]) and is_resource_compiler(cmds[1])):
+            return self.create_resource_rule(target)
+
         # Check to see if this could be a py_binary:
         # -> the command starts with a python interpreter, 2nd is a .py file
         # -> the command starts with a .py file
@@ -277,9 +303,6 @@ class CustomTargetGenerator:
 
             cmds[0] = f"$(location :{rule.name})"
             tools = [f":{rule.name}"]
-        elif isinstance(cmds[0], str):
-            if is_resource_compiler(cmds[0]):
-                return self.create_resource_rule(target)
         else:
             # TODO: Add support for shell scripts and executables that are created
             # as part of the build

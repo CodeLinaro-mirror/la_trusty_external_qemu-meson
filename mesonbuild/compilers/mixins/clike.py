@@ -549,20 +549,21 @@ class CLikeCompiler(Compiler):
             extra_args = []
         if self.is_cross:
             return self.cross_compute_int(expression, low, high, guess, prefix, env, extra_args, dependencies)
-        t = f'''{prefix}
-        #include<stddef.h>
-        #include<stdio.h>
-        int main(void) {{
-            printf("%ld\\n", (long)({expression}));
-            return 0;
-        }}'''
-        res = self.run(t, env, extra_args=extra_args,
-                       dependencies=dependencies)
-        if not res.compiled:
-            return -1
-        if res.returncode != 0:
-            raise mesonlib.EnvironmentException('Could not run compute_int test binary.')
-        return int(res.stdout)
+        try:
+            t = f'''{prefix}
+            #include<stddef.h>
+            #include<stdio.h>
+            int main(void) {{
+                printf("%ld\\n", (long)({expression}));
+                return 0;
+            }}'''
+            res = self.run(t, env, extra_args=extra_args,
+                           dependencies=dependencies)
+            if res.compiled and res.returncode == 0:
+                return int(res.stdout)
+        except Exception:
+            pass
+        return self.cross_compute_int(expression, low, high, guess, prefix, env, extra_args, dependencies)
 
     def cross_sizeof(self, typename: str, prefix: str, env: 'Environment', *,
                      extra_args: T.Union[None, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]] = None,
@@ -589,20 +590,21 @@ class CLikeCompiler(Compiler):
             r = self.cross_sizeof(typename, prefix, env, extra_args=extra_args,
                                   dependencies=dependencies)
             return r, False
-        t = f'''{prefix}
-        #include<stddef.h>
-        #include<stdio.h>
-        int main(void) {{
-            printf("%ld\\n", (long)(sizeof({typename})));
-            return 0;
-        }}'''
-        res = self.cached_run(t, env, extra_args=extra_args,
-                              dependencies=dependencies)
-        if not res.compiled:
-            return -1, False
-        if res.returncode != 0:
-            raise mesonlib.EnvironmentException('Could not run sizeof test binary.')
-        return int(res.stdout), res.cached
+        try:
+            t = f'''{prefix}
+            #include<stddef.h>
+            #include<stdio.h>
+            int main(void) {{
+                printf("%ld\\n", (long)(sizeof({typename})));
+                return 0;
+            }}'''
+            res = self.cached_run(t, env, extra_args=extra_args,
+                                  dependencies=dependencies)
+            if res.compiled and res.returncode == 0:
+                return int(res.stdout), res.cached
+        except Exception:
+            pass
+        return self.cross_sizeof(typename, prefix, env, extra_args=extra_args, dependencies=dependencies), False
 
     def cross_alignment(self, typename: str, prefix: str, env: 'Environment', *,
                         extra_args: T.Optional[T.List[str]] = None,
@@ -635,33 +637,25 @@ class CLikeCompiler(Compiler):
             r = self.cross_alignment(typename, prefix, env, extra_args=extra_args,
                                      dependencies=dependencies)
             return r, False
-        t = f'''{prefix}
-        #include <stdio.h>
-        #include <stddef.h>
-        struct tmp {{
-            char c;
-            {typename} target;
-        }};
-        int main(void) {{
-            printf("%d", (int)offsetof(struct tmp, target));
-            return 0;
-        }}'''
-        res = self.cached_run(t, env, extra_args=extra_args,
-                              dependencies=dependencies)
-        if not res.compiled:
-            raise mesonlib.EnvironmentException('Could not compile alignment test.')
-        if res.returncode != 0:
-            raise mesonlib.EnvironmentException('Could not run alignment test binary.')
-
-        align: int
         try:
-            align = int(res.stdout)
-        except ValueError:
-            # If we get here, the user is most likely using a script that is
-            # pretending to be a compiler.
-            raise mesonlib.EnvironmentException('Could not run alignment test binary.')
-        if align == 0:
-            raise mesonlib.EnvironmentException(f'Could not determine alignment of {typename}. Sorry. You might want to file a bug.')
+            t = f'''{prefix}
+            #include <stdio.h>
+            #include <stddef.h>
+            struct tmp {{
+                char c;
+                {typename} target;
+            }};
+            int main(void) {{
+                printf("%d", (int)offsetof(struct tmp, target));
+                return 0;
+            }}'''
+            res = self.cached_run(t, env, extra_args=extra_args,
+                                  dependencies=dependencies)
+            if res.compiled and res.returncode == 0:
+                return int(res.stdout), res.cached
+        except Exception:
+            pass
+        return self.cross_alignment(typename, prefix, env, extra_args=extra_args, dependencies=dependencies), False
 
         return align, res.cached
 
