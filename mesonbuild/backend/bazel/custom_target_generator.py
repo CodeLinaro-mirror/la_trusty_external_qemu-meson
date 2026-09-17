@@ -159,7 +159,9 @@ class CustomTargetGenerator:
         for x in file_deps:
             if x.endswith(".py"):
                 try:
-                    resolved_srcs.append(self.resolver.find(x).as_posix())
+                    p = self.resolver.find(x)
+                    if not p.is_absolute():
+                        resolved_srcs.append(p.as_posix())
                 except Exception:
                     pass
         srcs = OrderedSet(sorted(resolved_srcs))
@@ -168,7 +170,9 @@ class CustomTargetGenerator:
         for x in file_deps:
             if not x.endswith(".py"):
                 try:
-                    resolved_data.append(self.resolver.find(x).as_posix())
+                    p = self.resolver.find(x)
+                    if not p.is_absolute():
+                        resolved_data.append(p.as_posix())
                 except Exception:
                     pass
         data = OrderedSet(sorted(resolved_data))
@@ -219,6 +223,15 @@ class CustomTargetGenerator:
                     mlog.warning(f"Failed to generate {outputs} (attempt {attempt}/{max_retries}) due to {se}. Retrying...")
                     time.sleep(0.5)
 
+    def resolve_existing_path(self, path: T.Union[str, Path]) -> T.Optional[Path]:
+        if not path:
+            return None
+        p = Path(path)
+        if p.is_absolute():
+            return p if p.exists() else None
+        candidate = self.resolver.source_dir / p
+        return candidate if candidate.exists() else None
+
     def generate(self, target: build.CustomTarget) -> BazelRule:
         if self.library.is_registered(target.name):
             return self.library.get(target.name)
@@ -240,7 +253,9 @@ class CustomTargetGenerator:
         self.build_outputs(outs)
 
         cmd_inputs = [
-            f"$(location {s})" if os.path.isfile(s) else f"$(RULEDIR)/{s}"
+            f"$(location {s})"
+            if (resolved := self.resolve_existing_path(s)) and resolved.is_file()
+            else f"$(RULEDIR)/{s}"
             for s in srcs
         ]
         cmd_outputs = [f"$(location {i})" for i in outs]
@@ -344,10 +359,11 @@ class CustomTargetGenerator:
                 # dependency list (`tools` or `srcs`).
                 #
                 # We handle three cases for the path `i`:
-                if os.path.exists(i):
-                    if os.path.isfile(i):
+                existing_path = self.resolve_existing_path(i)
+                if existing_path:
+                    if existing_path.is_file():
                         # This is a file, which could be one of two things:
-                        bazel_target = get_bazel_target_from_script(i)
+                        bazel_target = get_bazel_target_from_script(str(existing_path))
                         if bazel_target:
                             # CASE 1: It's a "known tool" (a Bazel wrapper script).
                             # This script is a shim for a pre-defined Bazel target
@@ -374,6 +390,10 @@ class CustomTargetGenerator:
                                 bazel_target = self.backend.bin_path_to_bazel_target[i]
                                 i = f"$(location {bazel_target})"
                                 tools.append(bazel_target)
+                            elif str(existing_path) in self.backend.bin_path_to_bazel_target:
+                                bazel_target = self.backend.bin_path_to_bazel_target[str(existing_path)]
+                                i = f"$(location {bazel_target})"
+                                tools.append(bazel_target)
                             else:
                                 if self.DEBUG_LOG:
                                     mlog.debug(f"     i-> str resolving: {i}")
@@ -386,7 +406,7 @@ class CustomTargetGenerator:
                         # directory, which is represented by $(RULEDIR) in Bazel.
                         i = "$(RULEDIR)"
 
-                # (Else: if os.path.exists(i) is false, `i` is likely a string literal
+                # (Else: if existing_path is None, `i` is likely a string literal
                 # or command that doesn't represent a file path, so we leave it as-is.)
 
                 if self.DEBUG_LOG:
