@@ -1,0 +1,6 @@
+module(
+    name = "meson",
+    version = "1.5.1",
+)
+
+bazel_dep(name = "rules_python", version = "1.8.4")

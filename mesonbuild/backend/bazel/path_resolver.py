@@ -218,11 +218,11 @@ class PathResolver:
                 relative = resolved.relative_to(self.build_dir)
                 return self.build_prefix / relative
 
-            # okay, you do not exist in source or shadow. not good!
+            # okay, you do not exist in source or shadow.
             if not symlinked:
-                # Let's true to resolve it through a symlink..
+                # Let's try to resolve it through a symlink..
                 return self.find(resolved, True)
-            raise FileNotFoundError(f"Unable to resolve {filename} last attempt was ({resolved})")
+            return resolved
 
         # Ok we have a relative path.. It could exist in our source dir:
         if Path.joinpath(self.source_dir, p).exists():

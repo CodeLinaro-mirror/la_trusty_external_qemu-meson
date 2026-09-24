@@ -47,14 +47,21 @@ def is_python_exe(prog):
 
 
 def is_resource_compiler(prog) -> bool:
-    if "rc" not in prog:
+    if isinstance(prog, (Path, str)):
+        stem = Path(str(prog)).stem.lower()
+        if stem in ["windres", "rc", "llvm-rc", "windmc", "llvm-windres"]:
+            return True
+        if "windres" in stem or "llvm-rc" in stem:
+            return True
+    try:
+        info = subprocess.check_output([str(prog), "-h"], encoding="utf-8")
+        return (
+            "Microsoft (R) Windows (R) Resource Compiler" in info
+            or "LLVM Resource Converter" in info
+            or "llvm-windres" in info
+        )
+    except Exception:
         return False
-
-    info = subprocess.check_output([prog, "-h"], encoding="utf-8")
-    return (
-        "Microsoft (R) Windows (R) Resource Compiler" in info
-        or "LLVM Resource Converter" in info
-    )
 
 
 def get_bazel_target_from_script(file_path: str) -> T.Optional[str]:
@@ -104,6 +111,10 @@ class CustomTargetGenerator:
     def get_executable(self, target: build.CustomTarget, program: [str | File]) -> str:
         if isinstance(program, File):
             program = program.relative_name()
+        elif isinstance(program, str) and program.startswith("$(location ") and program.endswith(")"):
+            # Tools declared in build-config.jsonc ("binaries") are emitted as
+            # '$(location <bazel_target>)'. Strip the wrapper to extract the clean target name.
+            program = program[len("$(location "):-1]
         return Path(program).with_suffix("").name
 
     def create_py_binary(self, target: build.CustomTarget, cmds: T.List[str | File]):
@@ -119,8 +130,15 @@ class CustomTargetGenerator:
             prog = self.get_executable(target, cmds[0])
             py = cmds[0]
 
+        if isinstance(py, str) and py.startswith("$(location ") and py.endswith(")"):
+            # Strip '$(location ...)' before resolving file dependencies on disk.
+            py = py[len("$(location "):-1]
+
         if py not in target.depend_files:
-            file_deps.append(self.resolver.find(py).as_posix())
+            try:
+                file_deps.append(self.resolver.find(py).as_posix())
+            except Exception:
+                pass
 
         # Binary has been created already.
         if self.library.is_registered(prog):
@@ -137,18 +155,27 @@ class CustomTargetGenerator:
 
         # file_deps contains all the file dependencies
         # We need to split them into python and data files
-        srcs = OrderedSet(
-            sorted(
-                self.resolver.find(x).as_posix() for x in file_deps if x.endswith(".py")
-            )
-        )
-        data = OrderedSet(
-            sorted(
-                self.resolver.find(x).as_posix()
-                for x in file_deps
-                if not x.endswith(".py")
-            )
-        )
+        resolved_srcs = []
+        for x in file_deps:
+            if x.endswith(".py"):
+                try:
+                    p = self.resolver.find(x)
+                    if not p.is_absolute():
+                        resolved_srcs.append(p.as_posix())
+                except Exception:
+                    pass
+        srcs = OrderedSet(sorted(resolved_srcs))
+
+        resolved_data = []
+        for x in file_deps:
+            if not x.endswith(".py"):
+                try:
+                    p = self.resolver.find(x)
+                    if not p.is_absolute():
+                        resolved_data.append(p.as_posix())
+                except Exception:
+                    pass
+        data = OrderedSet(sorted(resolved_data))
 
         return self.library.register(
             BazelRule(
@@ -196,6 +223,15 @@ class CustomTargetGenerator:
                     mlog.warning(f"Failed to generate {outputs} (attempt {attempt}/{max_retries}) due to {se}. Retrying...")
                     time.sleep(0.5)
 
+    def resolve_existing_path(self, path: T.Union[str, Path]) -> T.Optional[Path]:
+        if not path:
+            return None
+        p = Path(path)
+        if p.is_absolute():
+            return p if p.exists() else None
+        candidate = self.resolver.source_dir / p
+        return candidate if candidate.exists() else None
+
     def generate(self, target: build.CustomTarget) -> BazelRule:
         if self.library.is_registered(target.name):
             return self.library.get(target.name)
@@ -217,7 +253,9 @@ class CustomTargetGenerator:
         self.build_outputs(outs)
 
         cmd_inputs = [
-            f"$(location {s})" if os.path.isfile(s) else f"$(RULEDIR)/{s}"
+            f"$(location {s})"
+            if (resolved := self.resolve_existing_path(s)) and resolved.is_file()
+            else f"$(RULEDIR)/{s}"
             for s in srcs
         ]
         cmd_outputs = [f"$(location {i})" for i in outs]
@@ -241,6 +279,9 @@ class CustomTargetGenerator:
             mlog.debug(f"     cmd_inputs:  {cmd_inputs}")
 
         tools = []
+
+        if is_resource_compiler(cmds[0]) or (len(cmds) > 1 and is_python_exe(cmds[0]) and is_resource_compiler(cmds[1])):
+            return self.create_resource_rule(target)
 
         # Check to see if this could be a py_binary:
         # -> the command starts with a python interpreter, 2nd is a .py file
@@ -277,9 +318,6 @@ class CustomTargetGenerator:
 
             cmds[0] = f"$(location :{rule.name})"
             tools = [f":{rule.name}"]
-        elif isinstance(cmds[0], str):
-            if is_resource_compiler(cmds[0]):
-                return self.create_resource_rule(target)
         else:
             # TODO: Add support for shell scripts and executables that are created
             # as part of the build
@@ -321,10 +359,11 @@ class CustomTargetGenerator:
                 # dependency list (`tools` or `srcs`).
                 #
                 # We handle three cases for the path `i`:
-                if os.path.exists(i):
-                    if os.path.isfile(i):
+                existing_path = self.resolve_existing_path(i)
+                if existing_path:
+                    if existing_path.is_file():
                         # This is a file, which could be one of two things:
-                        bazel_target = get_bazel_target_from_script(i)
+                        bazel_target = get_bazel_target_from_script(str(existing_path))
                         if bazel_target:
                             # CASE 1: It's a "known tool" (a Bazel wrapper script).
                             # This script is a shim for a pre-defined Bazel target
@@ -351,6 +390,10 @@ class CustomTargetGenerator:
                                 bazel_target = self.backend.bin_path_to_bazel_target[i]
                                 i = f"$(location {bazel_target})"
                                 tools.append(bazel_target)
+                            elif str(existing_path) in self.backend.bin_path_to_bazel_target:
+                                bazel_target = self.backend.bin_path_to_bazel_target[str(existing_path)]
+                                i = f"$(location {bazel_target})"
+                                tools.append(bazel_target)
                             else:
                                 if self.DEBUG_LOG:
                                     mlog.debug(f"     i-> str resolving: {i}")
@@ -363,7 +406,7 @@ class CustomTargetGenerator:
                         # directory, which is represented by $(RULEDIR) in Bazel.
                         i = "$(RULEDIR)"
 
-                # (Else: if os.path.exists(i) is false, `i` is likely a string literal
+                # (Else: if existing_path is None, `i` is likely a string literal
                 # or command that doesn't represent a file path, so we leave it as-is.)
 
                 if self.DEBUG_LOG:
