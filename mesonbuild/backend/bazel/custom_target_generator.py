@@ -117,6 +117,16 @@ class CustomTargetGenerator:
             program = program[len("$(location "):-1]
         return Path(program).with_suffix("").name
 
+    def _resolve_relative_paths(self, paths):
+        """Yields resolved posix paths for any relative paths found."""
+        for path in paths:
+            try:
+                p = self.resolver.find(path)
+                if not p.is_absolute():
+                    yield p.as_posix()
+            except Exception:
+                pass
+
     def create_py_binary(self, target: build.CustomTarget, cmds: T.List[str | File]):
         """Creates a py_binary rule if needed for this target."""
         file_deps: T.List[File] = []
@@ -142,7 +152,17 @@ class CustomTargetGenerator:
 
         # Binary has been created already.
         if self.library.is_registered(prog):
-            return self.library.get(prog)
+            rule = self.library.get(prog)
+            valid_py_deps = (
+                f for f in target.depend_files
+                if not is_python_exe(f) and str(f).endswith(".py")
+            )
+            new_srcs = list(self._resolve_relative_paths(valid_py_deps))
+            if new_srcs:
+                current_srcs = set(rule.params.get("srcs", []))
+                current_srcs.update(new_srcs)
+                rule.params["srcs"] = OrderedSet(sorted(current_srcs))
+            return rule
 
         file_deps += [f for f in target.depend_files if not is_python_exe(f)]
         inputs = [
@@ -154,35 +174,15 @@ class CustomTargetGenerator:
         file_deps = substitute_values(file_deps, values)
 
         # file_deps contains all the file dependencies
-        # We need to split them into python and data files
-        resolved_srcs = []
-        for x in file_deps:
-            if x.endswith(".py"):
-                try:
-                    p = self.resolver.find(x)
-                    if not p.is_absolute():
-                        resolved_srcs.append(p.as_posix())
-                except Exception:
-                    pass
-        srcs = OrderedSet(sorted(resolved_srcs))
-
-        resolved_data = []
-        for x in file_deps:
-            if not x.endswith(".py"):
-                try:
-                    p = self.resolver.find(x)
-                    if not p.is_absolute():
-                        resolved_data.append(p.as_posix())
-                except Exception:
-                    pass
-        data = OrderedSet(sorted(resolved_data))
+        # Filter python files for the py_binary sources
+        py_deps = (x for x in file_deps if str(x).endswith(".py"))
+        srcs = OrderedSet(sorted(self._resolve_relative_paths(py_deps)))
 
         return self.library.register(
             BazelRule(
                 "py_binary",
                 {
                     "name": prog,
-                    "data": data,
                     "srcs": srcs,
                 },
             )
@@ -286,11 +286,13 @@ class CustomTargetGenerator:
         # Check to see if this could be a py_binary:
         # -> the command starts with a python interpreter, 2nd is a .py file
         # -> the command starts with a .py file
+        is_py = False
         if isinstance(cmds[0], build.Executable):
             label = as_bazel_label(cmds[0].name)
             cmds[0] = f"$(location :{label})"
             tools = [f":{label}"]
         elif is_python_exe(cmds[0]):
+            is_py = True
             rule = self.create_py_binary(target, cmds)
             if not rule.is_valid():
                 mlog.warning(
@@ -303,10 +305,8 @@ class CustomTargetGenerator:
             cmds.pop(0)
             cmds[0] = f"$(location :{rule.name})"
             tools = [f":{rule.name}"]
-            # It looks like we need to propagate the [data] section
-            # to the dependencies of the custom command.
-            srcs.update(rule.params.get("data", []))
         elif Path(cmds[0]).suffix == ".py":
+            is_py = True
             rule = self.create_py_binary(target, cmds)
             if not rule.is_valid():
                 mlog.warning(
@@ -325,6 +325,23 @@ class CustomTargetGenerator:
                 f"Genrule {cmds} {type(cmds[0])} for {target.name}: not supported, ignoring"
             )
             return
+
+        # Add target depend_files to genrule srcs.
+        # If running a py_binary, python sources (.py) are bundled in the py_binary tool,
+        # so only non-python depend_files (like schemas or data) are added to genrule srcs.
+        # If not a py_binary, all depend_files are added to genrule srcs.
+        inputs_for_deps = [
+            self.resolver.resolve_from_build(x).as_posix()
+            for x in self.backend.get_custom_target_sources(target)
+        ]
+        values_for_deps = get_filenames_templates_dict(inputs_for_deps, [])
+        dep_files = substitute_values(target.depend_files, values_for_deps)
+        valid_deps = (
+            dep for dep in dep_files
+            if not is_python_exe(dep) and (not is_py or not str(dep).endswith(".py"))
+        )
+
+        srcs.update(self._resolve_relative_paths(valid_deps))
 
         cmd: T.List[str] = []
         for i in cmds:
